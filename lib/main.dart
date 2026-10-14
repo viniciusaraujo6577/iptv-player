@@ -25,11 +25,11 @@ class PremiumIPTVApp extends StatelessWidget {
     return MaterialApp(
       title: 'UNEX Vision',
       debugShowCheckedModeBanner: false,
-      // Ativa o clique com o botão central/OK do controle remoto da TV Box
-      shortcuts: <LogicalKeySet, Intent>{
+      shortcuts: <ShortcutActivator, Intent>{
         ...WidgetsApp.defaultShortcuts,
-        LogicalKeySet(LogicalKeyboardKey.select): const ActivateIntent(),
-        LogicalKeySet(LogicalKeyboardKey.enter): const ActivateIntent(),
+        const SingleActivator(LogicalKeyboardKey.select): const ActivateIntent(),
+        const SingleActivator(LogicalKeyboardKey.enter): const ActivateIntent(),
+        const SingleActivator(LogicalKeyboardKey.gameButtonA): const ActivateIntent(),
       },
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF090A0F),
@@ -129,7 +129,7 @@ class _MainDashboardState extends State<MainDashboard> {
         });
 
         if (parsed.isNotEmpty && activeChannel == null) {
-          selectChannelForPreview(parsed.first, openFullOnMobile: false);
+          selectChannelForPreview(parsed.first);
         }
       } else {
         setState(() {
@@ -179,8 +179,7 @@ class _MainDashboardState extends State<MainDashboard> {
     });
   }
 
-  Future<void> selectChannelForPreview(Channel channel,
-      {bool openFullOnMobile = false}) async {
+  Future<void> selectChannelForPreview(Channel channel) async {
     final isSameChannel = activeChannel?.id == channel.id;
 
     if (isSameChannel && isPreviewInitialized) {
@@ -221,7 +220,8 @@ class _MainDashboardState extends State<MainDashboard> {
       MaterialPageRoute(
         builder: (_) => FullScreenPlayer(
           initialChannel: channel,
-          playlist: displayedChannels.isNotEmpty ? displayedChannels : allChannels,
+          playlist:
+              displayedChannels.isNotEmpty ? displayedChannels : allChannels,
         ),
       ),
     ).then((_) {
@@ -258,7 +258,8 @@ class _MainDashboardState extends State<MainDashboard> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancelar', style: TextStyle(color: Colors.white60)),
+            child:
+                const Text('Cancelar', style: TextStyle(color: Colors.white60)),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
@@ -298,13 +299,9 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
-  // ===========================================================================
-  // INTERFACE DE TV / TV BOX (WIDESCREEN 3 PAINÉIS COM LIVE PREVIEW)
-  // ===========================================================================
   Widget _buildTVInterface() {
     return Row(
       children: [
-        // 1. MENU LATERAL DE CATEGORIAS
         Container(
           width: 240,
           decoration: const BoxDecoration(
@@ -345,7 +342,8 @@ class _MainDashboardState extends State<MainDashboard> {
               const Divider(color: Colors.white10, height: 1),
               Expanded(
                 child: ListView.builder(
-                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
                   itemCount: categories.length,
                   itemBuilder: (context, index) {
                     final cat = categories[index];
@@ -426,9 +424,8 @@ class _MainDashboardState extends State<MainDashboard> {
                     padding: const EdgeInsets.symmetric(
                         vertical: 10, horizontal: 14),
                     decoration: BoxDecoration(
-                      color: isFocused
-                          ? Colors.white12
-                          : const Color(0xFF151924),
+                      color:
+                          isFocused ? Colors.white12 : const Color(0xFF151924),
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
                           color: isFocused
@@ -449,13 +446,10 @@ class _MainDashboardState extends State<MainDashboard> {
             ],
           ),
         ),
-
-        // 2. ÁREA CENTRAL: BUSCA + GRADE DE CANAIS
         Expanded(
           flex: 6,
           child: Column(
             children: [
-              // Barra Superior de Pesquisa e Contagem
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
                 child: Row(
@@ -512,8 +506,6 @@ class _MainDashboardState extends State<MainDashboard> {
                   ],
                 ),
               ),
-
-              // Grade de Canais
               Expanded(
                 child: displayedChannels.isEmpty
                     ? const Center(
@@ -622,8 +614,6 @@ class _MainDashboardState extends State<MainDashboard> {
             ],
           ),
         ),
-
-        // 3. PAINEL DIREITO: MINI PLAYER AO VIVO & DETALHES DO CANAL
         Container(
           width: 340,
           decoration: const BoxDecoration(
@@ -651,7 +641,6 @@ class _MainDashboardState extends State<MainDashboard> {
                 ],
               ),
               const SizedBox(height: 14),
-              // Janela de Vídeo
               AspectRatio(
                 aspectRatio: 16 / 9,
                 child: ClipRRect(
@@ -759,7 +748,9 @@ class _MainDashboardState extends State<MainDashboard> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(
-                              isFav ? Icons.star_rounded : Icons.star_outline_rounded,
+                              isFav
+                                  ? Icons.star_rounded
+                                  : Icons.star_outline_rounded,
                               color: isFav ? Colors.amber : Colors.white70,
                               size: 20,
                             ),
@@ -789,13 +780,9 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
-  // ===========================================================================
-  // INTERFACE DE CELULAR (PLAYER FIXO NO TOPO + CATEGORIAS EM CHIPS)
-  // ===========================================================================
   Widget _buildMobileInterface() {
     return Column(
       children: [
-        // Top Header
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           child: Row(
@@ -832,8 +819,6 @@ class _MainDashboardState extends State<MainDashboard> {
             ],
           ),
         ),
-
-        // Mini Player Fixo no Topo (Estilo YouTube)
         if (activeChannel != null)
           AspectRatio(
             aspectRatio: 16 / 9,
@@ -850,27 +835,35 @@ class _MainDashboardState extends State<MainDashboard> {
                   right: 12,
                   child: Row(
                     children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.black87,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.circle,
-                                color: Colors.redAccent, size: 8),
-                            const SizedBox(width: 6),
-                            Text(
-                              activeChannel!.name,
-                              style: const TextStyle(
-                                  fontSize: 12, fontWeight: FontWeight.bold),
-                            ),
-                          ],
+                      Flexible(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.black87,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.circle,
+                                  color: Colors.redAccent, size: 8),
+                              const SizedBox(width: 6),
+                              Flexible(
+                                child: Text(
+                                  activeChannel!.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                      const Spacer(),
+                      const SizedBox(width: 8),
                       ElevatedButton.icon(
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF00E5FF),
@@ -891,8 +884,6 @@ class _MainDashboardState extends State<MainDashboard> {
               ],
             ),
           ),
-
-        // Barra de Busca Mobile
         Padding(
           padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
           child: Container(
@@ -919,8 +910,6 @@ class _MainDashboardState extends State<MainDashboard> {
             ),
           ),
         ),
-
-        // Chips Horizontais de Categorias
         SizedBox(
           height: 42,
           child: ListView.builder(
@@ -952,10 +941,7 @@ class _MainDashboardState extends State<MainDashboard> {
             },
           ),
         ),
-
         const SizedBox(height: 8),
-
-        // Lista de Canais Mobile
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -998,7 +984,9 @@ class _MainDashboardState extends State<MainDashboard> {
                     children: [
                       IconButton(
                         icon: Icon(
-                          isFav ? Icons.star_rounded : Icons.star_border_rounded,
+                          isFav
+                              ? Icons.star_rounded
+                              : Icons.star_border_rounded,
                           color: isFav ? Colors.amber : Colors.white30,
                         ),
                         onPressed: () => toggleFavorite(ch),
@@ -1134,9 +1122,6 @@ class _MainDashboardState extends State<MainDashboard> {
   }
 }
 
-// =============================================================================
-// PLAYER EM TELA CHEIA COM OSD E TROCA RÁPIDA DE CANAL (ZAPPING)
-// =============================================================================
 class FullScreenPlayer extends StatefulWidget {
   final Channel initialChannel;
   final List<Channel> playlist;
@@ -1270,8 +1255,6 @@ class _FullScreenPlayerState extends State<FullScreenPlayer> {
                         : const CircularProgressIndicator(
                             color: Color(0xFF00E5FF)),
               ),
-
-              // Overlay de Controles Moderno (OSD)
               if (showControls)
                 Container(
                   decoration: const BoxDecoration(
@@ -1290,7 +1273,6 @@ class _FullScreenPlayerState extends State<FullScreenPlayer> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      // Topo: Botão Voltar + Status Ao Vivo
                       Row(
                         children: [
                           IconButton(
@@ -1327,8 +1309,6 @@ class _FullScreenPlayerState extends State<FullScreenPlayer> {
                           ),
                         ],
                       ),
-
-                      // Rodapé: Card de Informação e Botões de Zapping
                       Container(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 20, vertical: 14),
@@ -1406,9 +1386,6 @@ class _FullScreenPlayerState extends State<FullScreenPlayer> {
   }
 }
 
-// =============================================================================
-// WIDGET ADAPTATIVO PARA NAVEGAÇÃO POR CONTROLE REMOTO (D-PAD) E TOQUE
-// =============================================================================
 class TVFocusableItem extends StatefulWidget {
   final VoidCallback onSelect;
   final Widget Function(BuildContext context, bool isFocused) builder;
@@ -1446,9 +1423,6 @@ class _TVFocusableItemState extends State<TVFocusableItem> {
   }
 }
 
-// =============================================================================
-// PARSER M3U EM SEGUNDO PLANO (ALTA PERFORMANCE)
-// =============================================================================
 List<Channel> parseM3UContent(String raw) {
   final List<Channel> result = [];
   final lines = const LineSplitter().convert(raw);
