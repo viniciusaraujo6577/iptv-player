@@ -16,7 +16,6 @@ const Map<String, String> kIptvHeaders = {
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Impede qualquer faixa amarela/preta de debug na interface
   ErrorWidget.builder = (FlutterErrorDetails details) {
     return const SizedBox.shrink();
   };
@@ -46,6 +45,7 @@ class UnexVisionApp extends StatelessWidget {
             const ActivateIntent(),
         const SingleActivator(LogicalKeyboardKey.gameButtonA):
             const ActivateIntent(),
+        const SingleActivator(LogicalKeyboardKey.space): const ActivateIntent(),
       },
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF08090E),
@@ -68,9 +68,9 @@ enum DeviceMode { mobile, tv }
 
 class AppStorage {
   static File get _deviceFile =>
-      File('${Directory.systemTemp.path}/unex_device_mode_v4.json');
+      File('${Directory.systemTemp.path}/unex_device_mode_v5.json');
   static File get _sessionFile =>
-      File('${Directory.systemTemp.path}/unex_verified_session_v4.json');
+      File('${Directory.systemTemp.path}/unex_verified_session_v5.json');
 
   static Future<DeviceMode?> loadDeviceMode() async {
     try {
@@ -134,6 +134,560 @@ Future<void> applyDeviceOrientation(DeviceMode mode) async {
 }
 
 // =============================================================================
+// DIÁLOGO PADRÃO PARA CONFIRMAR SAÍDA DO APLICATIVO (IMPEDE FECHAMENTO ACIDENTAL)
+// =============================================================================
+Future<void> showExitAppConfirmationDialog(BuildContext context) async {
+  await showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF151924),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      title: const Row(
+        children: [
+          Icon(Icons.exit_to_app_rounded, color: Color(0xFF00E5FF)),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text('Sair do Aplicativo?', style: TextStyle(fontSize: 17)),
+          ),
+        ],
+      ),
+      content: const Text(
+        'Deseja continuar assistindo ou fechar o UNEX Vision?',
+        style: TextStyle(color: Colors.white70, fontSize: 13),
+      ),
+      actions: [
+        TVFocusableItem(
+          autofocus: true,
+          autoScroll: false,
+          onSelect: () => Navigator.pop(ctx),
+          builder: (context, isFocused) => Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF00E5FF), Color(0xFF2979FF)],
+              ),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: isFocused ? Colors.white : Colors.transparent,
+                width: 2,
+              ),
+            ),
+            child: const Text(
+              'Continuar no App',
+              style:
+                  TextStyle(color: Colors.black, fontWeight: FontWeight.w900),
+            ),
+          ),
+        ),
+        TVFocusableItem(
+          autoScroll: false,
+          onSelect: () {
+            Navigator.pop(ctx);
+            SystemNavigator.pop();
+          },
+          builder: (context, isFocused) => Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E2230),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: isFocused ? Colors.redAccent : Colors.white12,
+                width: 2,
+              ),
+            ),
+            child: const Text(
+              'Fechar Aplicativo',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+// =============================================================================
+// TECLADO VIRTUAL PRÓPRIO PARA TV ANDROID (NUNCA TRAVA O CONTROLE REMOTO)
+// =============================================================================
+Future<void> openTVVirtualKeyboard({
+  required BuildContext context,
+  required TextEditingController controller,
+  required String title,
+  bool isNumericOnly = false,
+  bool isUrlField = false,
+  ValueChanged<String>? onChanged,
+  VoidCallback? onCompleted,
+}) async {
+  String currentText = controller.text;
+  bool isUppercase = false;
+
+  final List<String> alphaRows = [
+    '1234567890',
+    'qwertyuiop',
+    'asdfghjkl',
+    'zxcvbnm',
+    ':/.-_?=&@',
+  ];
+
+  final List<String> urlShortcuts = [
+    'http://',
+    'https://',
+    '.club',
+    '.com',
+    '.net',
+    '.org',
+    ':80',
+    ':8080',
+  ];
+
+  await showDialog(
+    context: context,
+    barrierDismissible: true,
+    builder: (ctx) {
+      return StatefulBuilder(
+        builder: (context, setModalState) {
+          void appendText(String str) {
+            setModalState(() {
+              currentText += str;
+              controller.text = currentText;
+            });
+            onChanged?.call(currentText);
+          }
+
+          void backspace() {
+            if (currentText.isNotEmpty) {
+              setModalState(() {
+                currentText = currentText.substring(0, currentText.length - 1);
+                controller.text = currentText;
+              });
+              onChanged?.call(currentText);
+            }
+          }
+
+          void clearAll() {
+            setModalState(() {
+              currentText = '';
+              controller.text = '';
+            });
+            onChanged?.call('');
+          }
+
+          return Dialog(
+            backgroundColor: const Color(0xFF10131C),
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: const BorderSide(color: Color(0xFF00E5FF), width: 1.5),
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 680),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Cabeçalho + Visor do Texto Digitado
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.keyboard_alt_outlined,
+                                color: Color(0xFF00E5FF), size: 20),
+                            const SizedBox(width: 8),
+                            Text(
+                              title,
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF00E5FF),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const Text(
+                          'Use as setas do controle e aperte OK',
+                          style: TextStyle(fontSize: 11, color: Colors.white54),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF07080C),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              currentText.isEmpty
+                                  ? ' (Vazio - selecione as teclas abaixo)'
+                                  : '$currentText▌',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: currentText.isEmpty
+                                    ? Colors.white38
+                                    : Colors.white,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Atalhos rápidos para URLs / DNS
+                    if (isUrlField && !isNumericOnly) ...[
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        alignment: WrapAlignment.center,
+                        children: urlShortcuts.map((shortcut) {
+                          return _buildKeyButton(
+                            label: shortcut,
+                            color: const Color(0xFF17243A),
+                            textColor: const Color(0xFF00E5FF),
+                            onTap: () => appendText(shortcut),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+
+                    // Grade de Teclas (Numérico ou Completo)
+                    if (isNumericOnly)
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        alignment: WrapAlignment.center,
+                        children: '1234567890'.split('').map((digit) {
+                          return _buildKeyButton(
+                            label: digit,
+                            width: 54,
+                            height: 44,
+                            autofocus: digit == '1',
+                            onTap: () => appendText(digit),
+                          );
+                        }).toList(),
+                      )
+                    else
+                      ...alphaRows.asMap().entries.map((entry) {
+                        final rowIndex = entry.key;
+                        final chars = entry.value.split('');
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            alignment: WrapAlignment.center,
+                            children: chars.asMap().entries.map((charEntry) {
+                              final rawChar = charEntry.value;
+                              final displayChar = isUppercase
+                                  ? rawChar.toUpperCase()
+                                  : rawChar;
+                              final isFirstKey =
+                                  rowIndex == 1 && charEntry.key == 0;
+                              return _buildKeyButton(
+                                label: displayChar,
+                                width: 46,
+                                height: 38,
+                                autofocus: isFirstKey,
+                                onTap: () => appendText(displayChar),
+                              );
+                            }).toList(),
+                          ),
+                        );
+                      }),
+
+                    const SizedBox(height: 10),
+
+                    // Barra Inferior de Ações do Teclado (Maiúsculas, Espaço, Apagar, Limpar, Concluir)
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.center,
+                      children: [
+                        if (!isNumericOnly)
+                          _buildKeyButton(
+                            label: isUppercase ? '⇧ MAIÚSC' : '⇧ minúsc',
+                            color: isUppercase
+                                ? const Color(0xFF00E5FF)
+                                : const Color(0xFF1C202E),
+                            textColor:
+                                isUppercase ? Colors.black : Colors.white,
+                            onTap: () => setModalState(
+                                () => isUppercase = !isUppercase),
+                          ),
+                        if (!isNumericOnly)
+                          _buildKeyButton(
+                            label: 'ESPAÇO',
+                            width: 110,
+                            color: const Color(0xFF1C202E),
+                            onTap: () => appendText(' '),
+                          ),
+                        _buildKeyButton(
+                          label: '⌫ APAGAR',
+                          color: const Color(0xFF2C1D24),
+                          textColor: Colors.orangeAccent,
+                          onTap: backspace,
+                        ),
+                        _buildKeyButton(
+                          label: 'LIMPAR TUDO',
+                          color: const Color(0xFF2C1D24),
+                          textColor: Colors.redAccent,
+                          onTap: clearAll,
+                        ),
+                        _buildKeyButton(
+                          label: '✓ CONCLUIR',
+                          width: 130,
+                          color: const Color(0xFF00E5FF),
+                          textColor: Colors.black,
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            onCompleted?.call();
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
+}
+
+Widget _buildKeyButton({
+  required String label,
+  required VoidCallback onTap,
+  double? width,
+  double height = 38,
+  Color color = const Color(0xFF181C28),
+  Color textColor = Colors.white,
+  bool autofocus = false,
+}) {
+  return TVFocusableItem(
+    autofocus: autofocus,
+    autoScroll: false,
+    onSelect: onTap,
+    builder: (context, isFocused) => AnimatedScale(
+      scale: isFocused ? 1.1 : 1.0,
+      duration: const Duration(milliseconds: 90),
+      child: Container(
+        width: width,
+        height: height,
+        padding: EdgeInsets.symmetric(horizontal: width == null ? 12 : 0),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: isFocused ? const Color(0xFF00E5FF) : color,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isFocused ? Colors.white : Colors.white12,
+            width: isFocused ? 2 : 1,
+          ),
+          boxShadow: isFocused
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFF00E5FF).withOpacity(0.45),
+                    blurRadius: 10,
+                  )
+                ]
+              : null,
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.bold,
+            color: isFocused ? Colors.black : textColor,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+// =============================================================================
+// CAMPO DE ENTRADA ADAPTATIVO (TOUCH NO CELULAR / TECLADO VIRTUAL NA TV)
+// =============================================================================
+class AdaptiveInputField extends StatefulWidget {
+  final DeviceMode deviceMode;
+  final TextEditingController controller;
+  final String label;
+  final String hint;
+  final IconData icon;
+  final bool isPassword;
+  final bool isUrlField;
+  final ValueChanged<String>? onChanged;
+  final VoidCallback? onSubmitted;
+
+  const AdaptiveInputField({
+    super.key,
+    required this.deviceMode,
+    required this.controller,
+    required this.label,
+    required this.hint,
+    required this.icon,
+    this.isPassword = false,
+    this.isUrlField = false,
+    this.onChanged,
+    this.onSubmitted,
+  });
+
+  @override
+  State<AdaptiveInputField> createState() => _AdaptiveInputFieldState();
+}
+
+class _AdaptiveInputFieldState extends State<AdaptiveInputField> {
+  bool _obscure = true;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onControllerUpdate);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerUpdate);
+    super.dispose();
+  }
+
+  void _onControllerUpdate() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // NO CELULAR: Usa o TextField tradicional que funcionou perfeitamente
+    if (widget.deviceMode == DeviceMode.mobile) {
+      return TextField(
+        controller: widget.controller,
+        obscureText: widget.isPassword ? _obscure : false,
+        onChanged: widget.onChanged,
+        onSubmitted: (_) => widget.onSubmitted?.call(),
+        decoration: InputDecoration(
+          labelText: widget.label,
+          hintText: widget.hint,
+          prefixIcon: Icon(widget.icon, color: const Color(0xFF00E5FF)),
+          suffixIcon: widget.isPassword
+              ? IconButton(
+                  icon:
+                      Icon(_obscure ? Icons.visibility_off : Icons.visibility),
+                  onPressed: () => setState(() => _obscure = !_obscure),
+                )
+              : null,
+          filled: true,
+          fillColor: const Color(0xFF08090E),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      );
+    }
+
+    // NA TV ANDROID: Botão focado por controle remoto que abre o Teclado Virtual sem travar
+    final hasValue = widget.controller.text.isNotEmpty;
+    final displayValue = !hasValue
+        ? widget.hint
+        : (widget.isPassword && _obscure)
+            ? '•' * widget.controller.text.length
+            : widget.controller.text;
+
+    return TVFocusableItem(
+      autoScroll: false,
+      onSelect: () {
+        openTVVirtualKeyboard(
+          context: context,
+          controller: widget.controller,
+          title: 'Digitar: ${widget.label}',
+          isUrlField: widget.isUrlField,
+          onChanged: widget.onChanged,
+        );
+      },
+      builder: (context, isFocused) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        decoration: BoxDecoration(
+          color: const Color(0xFF08090E),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isFocused ? const Color(0xFF00E5FF) : Colors.white12,
+            width: isFocused ? 2.2 : 1,
+          ),
+          boxShadow: isFocused
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFF00E5FF).withOpacity(0.25),
+                    blurRadius: 12,
+                  )
+                ]
+              : null,
+        ),
+        child: Row(
+          children: [
+            Icon(widget.icon, color: const Color(0xFF00E5FF), size: 22),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.label,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF00E5FF),
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    displayValue,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: hasValue ? Colors.white : Colors.white38,
+                      fontWeight:
+                          hasValue ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: isFocused ? const Color(0xFF00E5FF) : Colors.white10,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                'OK p/ Digitar',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  color: isFocused ? Colors.black : Colors.white70,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
 // MODELOS DE DADOS
 // =============================================================================
 enum ContentType { live, movie, series }
@@ -165,7 +719,7 @@ class StreamItem {
 }
 
 // =============================================================================
-// ROTEADOR INICIAL: VERIFICA SE JÁ ESCOLHEU CELULAR OU TV NA PRIMEIRA VEZ
+// ROTEADOR INICIAL
 // =============================================================================
 class StartupRouterScreen extends StatefulWidget {
   const StartupRouterScreen({super.key});
@@ -219,19 +773,12 @@ class _StartupRouterScreenState extends State<StartupRouterScreen> {
 // TELA 0: ESCOLHA DO DISPOSITIVO (CELULAR ANDROID OU TV ANDROID)
 // =============================================================================
 class DeviceSelectionScreen extends StatelessWidget {
-  final VoidCallback? onModeChangedOverride;
-
-  const DeviceSelectionScreen({super.key, this.onModeChangedOverride});
+  const DeviceSelectionScreen({super.key});
 
   Future<void> _selectMode(BuildContext context, DeviceMode mode) async {
     await AppStorage.saveDeviceMode(mode);
     await applyDeviceOrientation(mode);
     if (!context.mounted) return;
-
-    if (onModeChangedOverride != null) {
-      onModeChangedOverride!();
-      return;
-    }
 
     Navigator.pushReplacement(
       context,
@@ -246,78 +793,85 @@ class DeviceSelectionScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: RadialGradient(
-            center: Alignment.topCenter,
-            radius: 1.5,
-            colors: [Color(0xFF132238), Color(0xFF08090E)],
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) {
+        if (!didPop) showExitAppConfirmationDialog(context);
+      },
+      child: Scaffold(
+        body: Container(
+          decoration: const BoxDecoration(
+            gradient: RadialGradient(
+              center: Alignment.topCenter,
+              radius: 1.5,
+              colors: [Color(0xFF132238), Color(0xFF08090E)],
+            ),
           ),
-        ),
-        child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 680),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF00E5FF), Color(0xFF2979FF)],
+          child: SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 680),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF00E5FF), Color(0xFF2979FF)],
+                          ),
+                          borderRadius: BorderRadius.circular(18),
                         ),
-                        borderRadius: BorderRadius.circular(18),
+                        child: const Icon(Icons.devices_rounded,
+                            color: Colors.black, size: 38),
                       ),
-                      child: const Icon(Icons.devices_rounded,
-                          color: Colors.black, size: 38),
-                    ),
-                    const SizedBox(height: 18),
-                    const Text(
-                      'BEM-VINDO AO UNEX VISION',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1.5,
+                      const SizedBox(height: 18),
+                      const Text(
+                        'BEM-VINDO AO UNEX VISION',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1.5,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Em qual dispositivo você está usando o aplicativo?\nAjustaremos toda a interface e navegação para a sua escolha.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white60, fontSize: 14),
-                    ),
-                    const SizedBox(height: 32),
-                    Wrap(
-                      spacing: 20,
-                      runSpacing: 20,
-                      alignment: WrapAlignment.center,
-                      children: [
-                        _buildDeviceOptionCard(
-                          context: context,
-                          title: 'Celular Android',
-                          subtitle:
-                              'Interface vertical para tela de toque com menu lateral deslizante.',
-                          icon: Icons.smartphone_rounded,
-                          autofocus: true,
-                          onTap: () => _selectMode(context, DeviceMode.mobile),
-                        ),
-                        _buildDeviceOptionCard(
-                          context: context,
-                          title: 'TV Android / TV Box',
-                          subtitle:
-                              'Formato Widescreen horizontal adaptado para uso com controle remoto.',
-                          icon: Icons.tv_rounded,
-                          autofocus: false,
-                          onTap: () => _selectMode(context, DeviceMode.tv),
-                        ),
-                      ],
-                    ),
-                  ],
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Em qual dispositivo você está usando o aplicativo?\nAjustaremos toda a interface e os comandos para a sua escolha.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white60, fontSize: 14),
+                      ),
+                      const SizedBox(height: 32),
+                      Wrap(
+                        spacing: 20,
+                        runSpacing: 20,
+                        alignment: WrapAlignment.center,
+                        children: [
+                          _buildDeviceOptionCard(
+                            context: context,
+                            title: 'Celular Android',
+                            subtitle:
+                                'Interface vertical para tela de toque com menu lateral deslizante.',
+                            icon: Icons.smartphone_rounded,
+                            autofocus: false,
+                            onTap: () =>
+                                _selectMode(context, DeviceMode.mobile),
+                          ),
+                          _buildDeviceOptionCard(
+                            context: context,
+                            title: 'TV Android / TV Box',
+                            subtitle:
+                                'Interface Widescreen 100% controlada por controle remoto e teclado de TV próprio.',
+                            icon: Icons.tv_rounded,
+                            autofocus: true,
+                            onTap: () => _selectMode(context, DeviceMode.tv),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -342,7 +896,7 @@ class DeviceSelectionScreen extends StatelessWidget {
         autoScroll: false,
         onSelect: onTap,
         builder: (context, isFocused) => AnimatedScale(
-          scale: isFocused ? 1.04 : 1.0,
+          scale: isFocused ? 1.05 : 1.0,
           duration: const Duration(milliseconds: 140),
           child: Container(
             padding: const EdgeInsets.all(24),
@@ -356,7 +910,7 @@ class DeviceSelectionScreen extends StatelessWidget {
               boxShadow: isFocused
                   ? [
                       BoxShadow(
-                        color: const Color(0xFF00E5FF).withOpacity(0.28),
+                        color: const Color(0xFF00E5FF).withOpacity(0.3),
                         blurRadius: 20,
                       )
                     ]
@@ -422,7 +976,7 @@ class DeviceSelectionScreen extends StatelessWidget {
 }
 
 // =============================================================================
-// TELA 1: LOGIN LIMPO (DNS + USUÁRIO + SENHA OU LINK M3U DIRETO)
+// TELA 1: LOGIN LIMPO (COMPATÍVEL COM CONTROLE REMOTO E CELULAR)
 // =============================================================================
 class LoginGatewayScreen extends StatefulWidget {
   final DeviceMode deviceMode;
@@ -456,7 +1010,6 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
   late final TextEditingController _passController;
   late final TextEditingController _m3uController;
 
-  bool _obscurePass = true;
   late bool _useDirectM3uMode;
   bool _rememberMe = true;
   bool _checkingSavedSession = false;
@@ -522,7 +1075,7 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
     if (_useDirectM3uMode) {
       String rawM3u = _m3uController.text.trim();
       if (rawM3u.isEmpty) {
-        _showErrorSnackBar('Cole ou digite o link M3U completo.');
+        _showErrorSnackBar('Informe o link M3U completo.');
         return;
       }
       if (!rawM3u.startsWith('http://') && !rawM3u.startsWith('https://')) {
@@ -593,294 +1146,282 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
       );
     }
 
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: RadialGradient(
-            center: Alignment.topRight,
-            radius: 1.4,
-            colors: [Color(0xFF132238), Color(0xFF08090E)],
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) {
+        if (!didPop) showExitAppConfirmationDialog(context);
+      },
+      child: Scaffold(
+        body: Container(
+          decoration: const BoxDecoration(
+            gradient: RadialGradient(
+              center: Alignment.topRight,
+              radius: 1.4,
+              colors: [Color(0xFF132238), Color(0xFF08090E)],
+            ),
           ),
-        ),
-        child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 430),
-                child: Container(
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF12151F).withOpacity(0.95),
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(color: Colors.white10),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
+          child: SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 460),
+                  child: Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF12151F).withOpacity(0.95),
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.06),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    widget.deviceMode == DeviceMode.tv
+                                        ? Icons.tv_rounded
+                                        : Icons.smartphone_rounded,
+                                    size: 14,
+                                    color: const Color(0xFF00E5FF),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    widget.deviceMode == DeviceMode.tv
+                                        ? 'Modo TV Android'
+                                        : 'Modo Celular',
+                                    style: const TextStyle(
+                                        fontSize: 11, color: Colors.white70),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            TVFocusableItem(
+                              autoScroll: false,
+                              onSelect: () {
+                                Navigator.pushReplacement(
+                                  context,
+                                  MaterialPageRoute(
+                                      builder: (_) =>
+                                          const DeviceSelectionScreen()),
+                                );
+                              },
+                              builder: (context, isFocused) => Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: isFocused
+                                        ? const Color(0xFF00E5FF)
+                                        : Colors.transparent,
+                                  ),
+                                ),
+                                child: const Text(
+                                  'Trocar Dispositivo',
+                                  style: TextStyle(
+                                      fontSize: 11, color: Color(0xFF00E5FF)),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF00E5FF), Color(0xFF2979FF)],
+                            ),
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: const Icon(Icons.live_tv_rounded,
+                              color: Colors.black, size: 32),
+                        ),
+                        const SizedBox(height: 10),
+                        const Text(
+                          'UNEX VISION',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 2,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          _useDirectM3uMode
+                              ? 'Informe o link M3U completo da sua lista'
+                              : 'Selecione cada campo abaixo para preencher',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                              color: Colors.white54, fontSize: 12),
+                        ),
+                        if (widget.errorBannerMessage != null) ...[
+                          const SizedBox(height: 12),
                           Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 5),
+                            padding: const EdgeInsets.all(10),
                             decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.06),
-                              borderRadius: BorderRadius.circular(20),
+                              color: Colors.redAccent.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                  color: Colors.redAccent.withOpacity(0.5)),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.error_outline,
+                                    color: Colors.redAccent, size: 18),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    widget.errorBannerMessage!,
+                                    style: const TextStyle(
+                                        fontSize: 12, color: Colors.white),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 18),
+                        if (!_useDirectM3uMode) ...[
+                          AdaptiveInputField(
+                            deviceMode: widget.deviceMode,
+                            controller: _dnsController,
+                            label: 'URL / DNS do Servidor',
+                            hint: 'Ex: http://cdn4k.club',
+                            icon: Icons.dns_rounded,
+                            isUrlField: true,
+                          ),
+                          const SizedBox(height: 10),
+                          AdaptiveInputField(
+                            deviceMode: widget.deviceMode,
+                            controller: _userController,
+                            label: 'Usuário',
+                            hint: 'Digite seu usuário',
+                            icon: Icons.person_outline_rounded,
+                          ),
+                          const SizedBox(height: 10),
+                          AdaptiveInputField(
+                            deviceMode: widget.deviceMode,
+                            controller: _passController,
+                            label: 'Senha',
+                            hint: 'Digite sua senha',
+                            icon: Icons.lock_outline_rounded,
+                            isPassword: true,
+                            onSubmitted: _handleLoginSubmit,
+                          ),
+                        ] else ...[
+                          AdaptiveInputField(
+                            deviceMode: widget.deviceMode,
+                            controller: _m3uController,
+                            label: 'Link M3U Completo',
+                            hint: 'http://.../get.php?username=...&password=...',
+                            icon: Icons.link_rounded,
+                            isUrlField: true,
+                            onSubmitted: _handleLoginSubmit,
+                          ),
+                        ],
+                        const SizedBox(height: 18),
+                        SizedBox(
+                          width: double.infinity,
+                          child: TVFocusableItem(
+                            autoScroll: false,
+                            onSelect: _handleLoginSubmit,
+                            builder: (context, isFocused) => Container(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              decoration: BoxDecoration(
+                                gradient: const LinearGradient(
+                                  colors: [
+                                    Color(0xFF00E5FF),
+                                    Color(0xFF2979FF)
+                                  ],
+                                ),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(
+                                  color: isFocused
+                                      ? Colors.white
+                                      : Colors.transparent,
+                                  width: 2.5,
+                                ),
+                                boxShadow: isFocused
+                                    ? [
+                                        BoxShadow(
+                                          color: const Color(0xFF00E5FF)
+                                              .withOpacity(0.4),
+                                          blurRadius: 14,
+                                        )
+                                      ]
+                                    : null,
+                              ),
+                              child: const Center(
+                                child: Text(
+                                  'CONECTAR AGORA',
+                                  style: TextStyle(
+                                    color: Colors.black,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 1.2,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TVFocusableItem(
+                          autoScroll: false,
+                          onSelect: () => setState(
+                              () => _useDirectM3uMode = !_useDirectM3uMode),
+                          builder: (context, isFocused) => Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: isFocused
+                                    ? const Color(0xFF00E5FF)
+                                    : Colors.transparent,
+                              ),
                             ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(
-                                  widget.deviceMode == DeviceMode.tv
-                                      ? Icons.tv_rounded
-                                      : Icons.smartphone_rounded,
-                                  size: 14,
-                                  color: const Color(0xFF00E5FF),
+                                  _useDirectM3uMode
+                                      ? Icons.vpn_key_outlined
+                                      : Icons.link_rounded,
+                                  size: 15,
+                                  color: Colors.white54,
                                 ),
                                 const SizedBox(width: 6),
                                 Text(
-                                  widget.deviceMode == DeviceMode.tv
-                                      ? 'Modo TV'
-                                      : 'Modo Celular',
+                                  _useDirectM3uMode
+                                      ? 'Usar acesso com URL, Usuário e Senha'
+                                      : 'Inserir código / link M3U diretamente',
                                   style: const TextStyle(
-                                      fontSize: 11, color: Colors.white70),
+                                      fontSize: 12, color: Colors.white54),
                                 ),
                               ],
                             ),
                           ),
-                          TVFocusableItem(
-                            autoScroll: false,
-                            onSelect: () {
-                              Navigator.pushReplacement(
-                                context,
-                                MaterialPageRoute(
-                                    builder: (_) =>
-                                        const DeviceSelectionScreen()),
-                              );
-                            },
-                            builder: (context, isFocused) => Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                  color: isFocused
-                                      ? const Color(0xFF00E5FF)
-                                      : Colors.transparent,
-                                ),
-                              ),
-                              child: const Text(
-                                'Trocar Dispositivo',
-                                style: TextStyle(
-                                    fontSize: 11, color: Color(0xFF00E5FF)),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          gradient: const LinearGradient(
-                            colors: [Color(0xFF00E5FF), Color(0xFF2979FF)],
-                          ),
-                          borderRadius: BorderRadius.circular(18),
-                        ),
-                        child: const Icon(Icons.live_tv_rounded,
-                            color: Colors.black, size: 34),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'UNEX VISION',
-                        style: TextStyle(
-                          fontSize: 21,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 2,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        _useDirectM3uMode
-                            ? 'Cole o link M3U completo da sua lista'
-                            : 'Digite a URL (DNS), Usuário e Senha',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                            color: Colors.white54, fontSize: 12),
-                      ),
-                      if (widget.errorBannerMessage != null) ...[
-                        const SizedBox(height: 14),
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: Colors.redAccent.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                                color: Colors.redAccent.withOpacity(0.5)),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.error_outline,
-                                  color: Colors.redAccent, size: 18),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  widget.errorBannerMessage!,
-                                  style: const TextStyle(
-                                      fontSize: 12, color: Colors.white),
-                                ),
-                              ),
-                            ],
-                          ),
                         ),
                       ],
-                      const SizedBox(height: 20),
-                      if (!_useDirectM3uMode) ...[
-                        _buildInput(
-                          controller: _dnsController,
-                          label: 'URL / DNS',
-                          hint: 'Ex: http://cdn4k.club',
-                          icon: Icons.dns_rounded,
-                        ),
-                        const SizedBox(height: 12),
-                        _buildInput(
-                          controller: _userController,
-                          label: 'Usuário',
-                          hint: 'Seu usuário',
-                          icon: Icons.person_outline_rounded,
-                        ),
-                        const SizedBox(height: 12),
-                        TextField(
-                          controller: _passController,
-                          obscureText: _obscurePass,
-                          onSubmitted: (_) => _handleLoginSubmit(),
-                          decoration: InputDecoration(
-                            labelText: 'Senha',
-                            prefixIcon: const Icon(Icons.lock_outline_rounded,
-                                color: Color(0xFF00E5FF)),
-                            suffixIcon: IconButton(
-                              icon: Icon(_obscurePass
-                                  ? Icons.visibility_off
-                                  : Icons.visibility),
-                              onPressed: () =>
-                                  setState(() => _obscurePass = !_obscurePass),
-                            ),
-                            filled: true,
-                            fillColor: const Color(0xFF08090E),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: BorderSide.none,
-                            ),
-                          ),
-                        ),
-                      ] else ...[
-                        _buildInput(
-                          controller: _m3uController,
-                          label: 'Link M3U Completo',
-                          hint: 'http://.../get.php?username=...&password=...',
-                          icon: Icons.link_rounded,
-                        ),
-                      ],
-                      const SizedBox(height: 18),
-                      SizedBox(
-                        width: double.infinity,
-                        child: TVFocusableItem(
-                          autoScroll: false,
-                          onSelect: _handleLoginSubmit,
-                          builder: (context, isFocused) => Container(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            decoration: BoxDecoration(
-                              gradient: const LinearGradient(
-                                colors: [Color(0xFF00E5FF), Color(0xFF2979FF)],
-                              ),
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(
-                                color: isFocused
-                                    ? Colors.white
-                                    : Colors.transparent,
-                                width: 2,
-                              ),
-                            ),
-                            child: const Center(
-                              child: Text(
-                                'CONECTAR',
-                                style: TextStyle(
-                                  color: Colors.black,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 1.2,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TVFocusableItem(
-                        autoScroll: false,
-                        onSelect: () => setState(
-                            () => _useDirectM3uMode = !_useDirectM3uMode),
-                        builder: (context, isFocused) => Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 6),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: isFocused
-                                  ? const Color(0xFF00E5FF)
-                                  : Colors.transparent,
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                _useDirectM3uMode
-                                    ? Icons.vpn_key_outlined
-                                    : Icons.link_rounded,
-                                size: 15,
-                                color: Colors.white54,
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                _useDirectM3uMode
-                                    ? 'Usar acesso com URL, Usuário e Senha'
-                                    : 'Inserir código / link M3U diretamente',
-                                style: const TextStyle(
-                                    fontSize: 12, color: Colors.white54),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildInput({
-    required TextEditingController controller,
-    required String label,
-    required String hint,
-    required IconData icon,
-  }) {
-    return TextField(
-      controller: controller,
-      decoration: InputDecoration(
-        labelText: label,
-        hintText: hint,
-        prefixIcon: Icon(icon, color: const Color(0xFF00E5FF)),
-        filled: true,
-        fillColor: const Color(0xFF08090E),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide.none,
         ),
       ),
     );
@@ -917,7 +1458,6 @@ class _MainDashboardState extends State<MainDashboard> {
 
   late DeviceMode currentDeviceMode;
 
-  // Dados e Contadores
   List<StreamItem> allItems = [];
   List<StreamItem> liveItems = [];
   List<StreamItem> movieItems = [];
@@ -927,7 +1467,6 @@ class _MainDashboardState extends State<MainDashboard> {
   Map<String, int> categoryCounts = {};
   List<String> sectionCategories = ['Todas'];
 
-  // Seção ativa escolhida no Menu Lateral
   MainSection activeSection = MainSection.live;
   String selectedCategory = 'Todas';
   String searchQuery = '';
@@ -943,7 +1482,6 @@ class _MainDashboardState extends State<MainDashboard> {
   bool isLoading = true;
   String errorMessage = '';
 
-  // Mini Player / Preview
   StreamItem? activeItem;
   VideoPlayerController? _previewController;
   bool isPreviewReady = false;
@@ -1083,7 +1621,6 @@ class _MainDashboardState extends State<MainDashboard> {
           liveItems = live;
           movieItems = movies;
           seriesItems = series;
-          // Se a lista começar com canais ao vivo, abre em TV ao Vivo
           activeSection = live.isNotEmpty
               ? MainSection.live
               : movies.isNotEmpty
@@ -1255,6 +1792,29 @@ class _MainDashboardState extends State<MainDashboard> {
 
   void _promptParentalPin(VoidCallback onSuccess) {
     final pinCtrl = TextEditingController();
+
+    if (currentDeviceMode == DeviceMode.tv) {
+      openTVVirtualKeyboard(
+        context: context,
+        controller: pinCtrl,
+        title: 'PIN Controle Parental (Padrão: 0000)',
+        isNumericOnly: true,
+        onCompleted: () {
+          if (pinCtrl.text == parentalPin) {
+            onSuccess();
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('PIN incorreto!'),
+                backgroundColor: Colors.redAccent,
+              ),
+            );
+          }
+        },
+      );
+      return;
+    }
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -1323,7 +1883,6 @@ class _MainDashboardState extends State<MainDashboard> {
     });
   }
 
-  // Otimizado: busca qualidades apenas na lista de canais ao vivo (instantâneo mesmo em listas de 300k itens)
   List<StreamItem> _findQualityVariants(StreamItem item) {
     if (item.type != ContentType.live) return [item];
     final target = item.cleanName.toLowerCase();
@@ -1413,7 +1972,6 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
-  // Modal no Celular para escolher rapidamente entre dezenas de categorias
   void _showMobileCategoryPickerModal() {
     showModalBottomSheet(
       context: context,
@@ -1505,103 +2063,129 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
+  void _handleDashboardBackButton() {
+    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
+      Navigator.pop(context);
+      return;
+    }
+    if (searchQuery.isNotEmpty) {
+      setState(() {
+        searchQuery = '';
+        _searchController.clear();
+        _applyCategoryAndSearchFilter();
+      });
+      return;
+    }
+    if (selectedCategory != 'Todas') {
+      setState(() {
+        selectedCategory = 'Todas';
+        _applyCategoryAndSearchFilter();
+      });
+      return;
+    }
+    showExitAppConfirmationDialog(context);
+  }
+
   @override
   Widget build(BuildContext context) {
     final isTVMode = currentDeviceMode == DeviceMode.tv;
 
-    return Scaffold(
-      key: _scaffoldKey,
-      // Menu Lateral (Drawer) exclusivo para o Modo Celular
-      drawer: isTVMode ? null : _buildMobileSideDrawer(),
-      body: SafeArea(
-        child: Stack(
-          children: [
-            isLoading
-                ? _buildLoadingState()
-                : errorMessage.isNotEmpty
-                    ? _buildErrorState()
-                    : isTVMode
-                        ? _buildTVDedicatedInterface()
-                        : _buildMobileDedicatedInterface(),
-
-            // Janela Flutuante Picture-in-Picture (PiP)
-            if (isMiniPipFloating && activeItem != null)
-              Positioned(
-                bottom: 16,
-                right: 16,
-                child: Material(
-                  elevation: 16,
-                  borderRadius: BorderRadius.circular(14),
-                  color: const Color(0xFF12151F),
-                  child: Container(
-                    width: isTVMode ? 300 : 220,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                          color: const Color(0xFF00E5FF), width: 1.5),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        AspectRatio(
-                          aspectRatio: 16 / 9,
-                          child: ClipRRect(
-                            borderRadius: const BorderRadius.vertical(
-                                top: Radius.circular(13)),
-                            child: Container(
-                              color: Colors.black,
-                              child: _buildMiniVideoWidget(),
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) {
+        if (!didPop) _handleDashboardBackButton();
+      },
+      child: Scaffold(
+        key: _scaffoldKey,
+        drawer: isTVMode ? null : _buildMobileSideDrawer(),
+        body: SafeArea(
+          child: Stack(
+            children: [
+              isLoading
+                  ? _buildLoadingState()
+                  : errorMessage.isNotEmpty
+                      ? _buildErrorState()
+                      : isTVMode
+                          ? _buildTVDedicatedInterface()
+                          : _buildMobileDedicatedInterface(),
+              if (isMiniPipFloating && activeItem != null)
+                Positioned(
+                  bottom: 16,
+                  right: 16,
+                  child: Material(
+                    elevation: 16,
+                    borderRadius: BorderRadius.circular(14),
+                    color: const Color(0xFF12151F),
+                    child: Container(
+                      width: isTVMode ? 300 : 220,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                            color: const Color(0xFF00E5FF), width: 1.5),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          AspectRatio(
+                            aspectRatio: 16 / 9,
+                            child: ClipRRect(
+                              borderRadius: const BorderRadius.vertical(
+                                  top: Radius.circular(13)),
+                              child: Container(
+                                color: Colors.black,
+                                child: _buildMiniVideoWidget(),
+                              ),
                             ),
                           ),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 4),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  activeItem!.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    activeItem!.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold),
+                                  ),
                                 ),
-                              ),
-                              TVIconButton(
-                                icon: Icons.open_in_full_rounded,
-                                size: 16,
-                                color: const Color(0xFF00E5FF),
-                                onPressed: () {
-                                  setState(() => isMiniPipFloating = false);
-                                  _openFullScreen(activeItem!);
-                                },
-                              ),
-                              TVIconButton(
-                                icon: Icons.close_rounded,
-                                size: 16,
-                                onPressed: () {
-                                  _previewController?.pause();
-                                  setState(() => isMiniPipFloating = false);
-                                },
-                              ),
-                            ],
+                                TVIconButton(
+                                  icon: Icons.open_in_full_rounded,
+                                  size: 16,
+                                  color: const Color(0xFF00E5FF),
+                                  onPressed: () {
+                                    setState(() => isMiniPipFloating = false);
+                                    _openFullScreen(activeItem!);
+                                  },
+                                ),
+                                TVIconButton(
+                                  icon: Icons.close_rounded,
+                                  size: 16,
+                                  onPressed: () {
+                                    _previewController?.pause();
+                                    setState(() => isMiniPipFloating = false);
+                                  },
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
   // ===========================================================================
-  // MENU LATERAL (DRAWER) DO CELULAR: ESCOLHA ENTRE TV AO VIVO, FILMES E SÉRIES
+  // MENU LATERAL (DRAWER) DO CELULAR (MANTIDO INTACTO)
   // ===========================================================================
   Widget _buildMobileSideDrawer() {
     return Drawer(
@@ -1610,7 +2194,6 @@ class _MainDashboardState extends State<MainDashboard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Cabeçalho do Menu Lateral com Resumo Geral da Lista
             Container(
               padding: const EdgeInsets.all(20),
               decoration: const BoxDecoration(
@@ -1688,7 +2271,6 @@ class _MainDashboardState extends State<MainDashboard> {
                 ],
               ),
             ),
-
             const Padding(
               padding: EdgeInsets.fromLTRB(18, 16, 18, 6),
               child: Text(
@@ -1701,7 +2283,6 @@ class _MainDashboardState extends State<MainDashboard> {
                 ),
               ),
             ),
-
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -1857,7 +2438,7 @@ class _MainDashboardState extends State<MainDashboard> {
   }
 
   // ===========================================================================
-  // INTERFACE DEDICADA PARA CELULAR ANDROID (SEM OVERFLOW + MENU LATERAL)
+  // INTERFACE DEDICADA PARA CELULAR ANDROID (MANTIDA INTACTA)
   // ===========================================================================
   Widget _buildMobileDedicatedInterface() {
     final isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
@@ -1865,7 +2446,6 @@ class _MainDashboardState extends State<MainDashboard> {
 
     return Column(
       children: [
-        // 1. TOPO COMPACTO E 100% LIVRE DE OVERFLOW
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: const BoxDecoration(
@@ -1906,7 +2486,6 @@ class _MainDashboardState extends State<MainDashboard> {
                   ],
                 ),
               ),
-              // Botão Discreto de Teste de Velocidade na Tela Inicial
               IconButton(
                 tooltip: 'Teste de Velocidade',
                 icon: const Icon(Icons.speed_rounded,
@@ -1922,8 +2501,6 @@ class _MainDashboardState extends State<MainDashboard> {
             ],
           ),
         ),
-
-        // 2. PLAYER DE PRÉ-VISUALIZAÇÃO LIMPO NO TOPO
         if (activeItem != null && !isMiniPipFloating && !isKeyboardOpen)
           AspectRatio(
             aspectRatio: 16 / 9,
@@ -2013,8 +2590,6 @@ class _MainDashboardState extends State<MainDashboard> {
               ],
             ),
           ),
-
-        // 3. BARRA DE PESQUISA + BOTÃO DE TODAS AS CATEGORIAS DA SEÇÃO
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
           child: Row(
@@ -2089,8 +2664,6 @@ class _MainDashboardState extends State<MainDashboard> {
             ],
           ),
         ),
-
-        // 4. BARRA DESLIZANTE DE CATEGORIAS DA SEÇÃO ATUAL
         SizedBox(
           height: 38,
           child: ListView.builder(
@@ -2120,10 +2693,7 @@ class _MainDashboardState extends State<MainDashboard> {
             },
           ),
         ),
-
         const SizedBox(height: 6),
-
-        // 5. LISTA DE CONTEÚDOS ESPECÍFICOS DA CATEGORIA
         Expanded(
           child: displayedItems.isEmpty
               ? const Center(
@@ -2209,12 +2779,12 @@ class _MainDashboardState extends State<MainDashboard> {
   }
 
   // ===========================================================================
-  // INTERFACE DEDICADA PARA TV ANDROID / TV BOX (CONTROLE REMOTO WIDESCREEN)
+  // INTERFACE DEDICADA PARA TV ANDROID / TV BOX (100% CONTROLE REMOTO)
   // ===========================================================================
   Widget _buildTVDedicatedInterface() {
     return Row(
       children: [
-        // 1. MENU LATERAL PRINCIPAL DA TV (SEÇÕES: TV AO VIVO, FILMES, SÉRIES)
+        // 1. MENU LATERAL PRINCIPAL DA TV
         Container(
           width: 210,
           decoration: const BoxDecoration(
@@ -2279,6 +2849,7 @@ class _MainDashboardState extends State<MainDashboard> {
                       count: liveItems.length,
                       icon: Icons.live_tv_rounded,
                       selected: activeSection == MainSection.live,
+                      autofocus: true,
                       onSelect: () => _selectSection(MainSection.live),
                     ),
                     _buildTVSideNavButton(
@@ -2430,11 +3001,11 @@ class _MainDashboardState extends State<MainDashboard> {
           ),
         ),
 
-        // 3. GRADE DE CONTEÚDOS E MINI-PLAYER LATERAL
+        // 3. GRADE DE CONTEÚDOS + BUSCA POR TECLADO VIRTUAL DE TV + PREVIEW
         Expanded(
           child: Column(
             children: [
-              // Barra Superior da TV (Busca + Preview compacto)
+              // Barra Superior da TV (Botão de Busca com Teclado Virtual de TV)
               Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -2445,33 +3016,101 @@ class _MainDashboardState extends State<MainDashboard> {
                 child: Row(
                   children: [
                     Expanded(
-                      child: Container(
-                        height: 38,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF12151F),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: Colors.white10),
-                        ),
-                        child: TextField(
-                          controller: _searchController,
-                          onChanged: (v) {
-                            searchQuery = v;
-                            _applyCategoryAndSearchFilter();
-                          },
-                          decoration: InputDecoration(
-                            hintText:
-                                'Pesquisar em ${_getSectionTitle(activeSection)}...',
-                            hintStyle: const TextStyle(
-                                fontSize: 12, color: Colors.white38),
-                            prefixIcon: const Icon(Icons.search,
-                                color: Color(0xFF00E5FF), size: 18),
-                            border: InputBorder.none,
-                            contentPadding:
-                                const EdgeInsets.symmetric(vertical: 9),
+                      child: TVFocusableItem(
+                        autoScroll: false,
+                        onSelect: () {
+                          openTVVirtualKeyboard(
+                            context: context,
+                            controller: _searchController,
+                            title:
+                                'Pesquisar em ${_getSectionTitle(activeSection)}',
+                            onChanged: (val) {
+                              searchQuery = val;
+                              _applyCategoryAndSearchFilter();
+                            },
+                          );
+                        },
+                        builder: (context, isFocused) => Container(
+                          height: 38,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF12151F),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: isFocused
+                                  ? const Color(0xFF00E5FF)
+                                  : Colors.white12,
+                              width: isFocused ? 2 : 1,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.search,
+                                  color: Color(0xFF00E5FF), size: 18),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  searchQuery.isEmpty
+                                      ? 'Aperte OK para pesquisar em ${_getSectionTitle(activeSection)}...'
+                                      : 'Filtro ativo: "$searchQuery"',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: searchQuery.isEmpty
+                                        ? Colors.white54
+                                        : const Color(0xFF00E5FF),
+                                    fontWeight: searchQuery.isEmpty
+                                        ? FontWeight.normal
+                                        : FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              if (searchQuery.isNotEmpty)
+                                const Text(
+                                  '(OK p/ alterar)',
+                                  style: TextStyle(
+                                      fontSize: 10, color: Colors.white54),
+                                ),
+                            ],
                           ),
                         ),
                       ),
                     ),
+                    if (searchQuery.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      TVFocusableItem(
+                        autoScroll: false,
+                        onSelect: () {
+                          setState(() {
+                            searchQuery = '';
+                            _searchController.clear();
+                            _applyCategoryAndSearchFilter();
+                          });
+                        },
+                        builder: (context, isFocused) => Container(
+                          height: 38,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2C1D24),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: isFocused
+                                  ? Colors.white
+                                  : Colors.redAccent.withOpacity(0.4),
+                            ),
+                          ),
+                          child: const Text(
+                            'Limpar Busca',
+                            style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.redAccent,
+                                fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+                    ],
                     const SizedBox(width: 12),
                     Text(
                       '${displayedItems.length} itens',
@@ -2526,7 +3165,7 @@ class _MainDashboardState extends State<MainDashboard> {
                                               : isPlaying
                                                   ? const Color(0xFF2979FF)
                                                   : Colors.white10,
-                                          width: isFocused ? 2 : 1,
+                                          width: isFocused ? 2.2 : 1,
                                         ),
                                       ),
                                       child: Row(
@@ -2715,8 +3354,10 @@ class _MainDashboardState extends State<MainDashboard> {
     required IconData icon,
     required bool selected,
     required VoidCallback onSelect,
+    bool autofocus = false,
   }) {
     return TVFocusableItem(
+      autofocus: autofocus,
       onSelect: onSelect,
       builder: (context, isFocused) => Container(
         margin: const EdgeInsets.symmetric(vertical: 3),
@@ -2917,6 +3558,7 @@ class _MainDashboardState extends State<MainDashboard> {
           const Text('CARREGANDO CONTEÚDOS DA LISTA...'),
           const SizedBox(height: 20),
           TVFocusableItem(
+            autofocus: true,
             autoScroll: false,
             onSelect: () => _returnToLoginForEditing(),
             builder: (context, isFocused) => Container(
@@ -2961,6 +3603,7 @@ class _MainDashboardState extends State<MainDashboard> {
                 alignment: WrapAlignment.center,
                 children: [
                   TVFocusableItem(
+                    autofocus: true,
                     autoScroll: false,
                     onSelect: () => _returnToLoginForEditing(
                       errorBanner:
@@ -3019,7 +3662,7 @@ class _MainDashboardState extends State<MainDashboard> {
 }
 
 // =============================================================================
-// TELA 3: PLAYER EM TELA CHEIA COM ANTI-TRAVAMENTO E QUALIDADE RÁPIDA
+// TELA 3: PLAYER EM TELA CHEIA COM CONTROLE REMOTO E PROTEÇÃO DO BOTÃO VOLTAR
 // =============================================================================
 class SmartAdaptivePlayerScreen extends StatefulWidget {
   final StreamItem initialItem;
@@ -3256,6 +3899,7 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
                             const Text('Transmissão indisponível no momento.'),
                             const SizedBox(height: 12),
                             TVFocusableItem(
+                              autofocus: true,
                               autoScroll: false,
                               onSelect: () {
                                 _autoRecoveryAttempts = 0;
@@ -3336,7 +3980,6 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        // Topo do Player (Elástico para não dar overflow em telas pequenas)
                         Row(
                           children: [
                             TVIconButton(
@@ -3406,8 +4049,6 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
                             ),
                           ],
                         ),
-
-                        // Rodapé do Player
                         Container(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 14, vertical: 10),
@@ -3552,6 +4193,7 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
                                 final ch = widget.playlist[idx];
                                 final selected = ch.id == currentItem.id;
                                 return TVFocusableItem(
+                                  autofocus: selected,
                                   onSelect: () {
                                     _initSmartStream(ch);
                                     setState(
@@ -3715,8 +4357,7 @@ class _SpeedTestDialogState extends State<SpeedTestDialog> {
           Icon(Icons.speed_rounded, color: Color(0xFF00E5FF)),
           SizedBox(width: 10),
           Expanded(
-            child: Text('Teste de Velocidade',
-                style: TextStyle(fontSize: 16)),
+            child: Text('Teste de Velocidade', style: TextStyle(fontSize: 16)),
           ),
         ],
       ),
@@ -3761,6 +4402,7 @@ class _SpeedTestDialogState extends State<SpeedTestDialog> {
         ),
         if (!isTesting)
           TVFocusableItem(
+            autofocus: true,
             autoScroll: false,
             onSelect: _runTest,
             builder: (context, isFocused) => Container(
