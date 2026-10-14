@@ -31,11 +31,12 @@ jobs:
           flutter create --org com.exemplo --project-name iptv_player --platforms=android .
           flutter pub get
 
-      - name: Configurar Permissões de Rede e TV
+      - name: Configurar Permissões de Rede e Launcher da Android TV
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          sed -i 's/<application/<application android:usesCleartextTraffic="true"/' $MANIFEST
+          sed -i 's/<application/<application android:usesCleartextTraffic="true" android:banner="@mipmap\/ic_launcher"/' $MANIFEST
           sed -i '/<manifest/a \    <uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>\n    <uses-feature android:name="android.hardware.touchscreen" android:required="false"\/>\n    <uses-feature android:name="android.software.leanback" android:required="false"\/>' $MANIFEST
+          sed -i 's/<category android:name="android.intent.category.LAUNCHER"\/>/<category android:name="android.intent.category.LAUNCHER"\/>\n                <category android:name="android.intent.category.LEANBACK_LAUNCHER"\/>/' $MANIFEST
 
       - name: Compilar APK
         run: flutter build apk --debug
