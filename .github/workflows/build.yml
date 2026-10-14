@@ -31,18 +31,24 @@ jobs:
           flutter create --org com.exemplo --project-name iptv_player --platforms=android .
           flutter pub get
 
-      - name: Configurar Permissões de Rede e Launcher da Android TV
+      - name: Configurar Android TV Launcher, Banner e Botão Voltar
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
+          sed -i 's/android:enableOnBackInvokedCallback="true"/android:enableOnBackInvokedCallback="false"/g' $MANIFEST
           sed -i 's/<application/<application android:usesCleartextTraffic="true" android:banner="@mipmap\/ic_launcher"/' $MANIFEST
           sed -i '/<manifest/a \    <uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>\n    <uses-feature android:name="android.hardware.touchscreen" android:required="false"\/>\n    <uses-feature android:name="android.software.leanback" android:required="false"\/>' $MANIFEST
           sed -i 's/<category android:name="android.intent.category.LAUNCHER"\/>/<category android:name="android.intent.category.LAUNCHER"\/>\n                <category android:name="android.intent.category.LEANBACK_LAUNCHER"\/>/' $MANIFEST
 
-      - name: Compilar APK
-        run: flutter build apk --debug
+      - name: Compilar APK Otimizado (Release Leve)
+        run: |
+          flutter build apk --release \
+            --target-platform android-arm,android-arm64 \
+            --tree-shake-icons \
+            --obfuscate \
+            --split-debug-info=build/debug-info
 
       - name: Disponibilizar APK para Download
         uses: actions/upload-artifact@v4
         with:
-          name: iptv-player-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          name: iptv-player-apk-leve
+          path: build/app/outputs/flutter-apk/app-release.apk
