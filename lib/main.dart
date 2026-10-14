@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
-import 'package:chewie/chewie.dart';
 
 void main() {
   runApp(const IPTVApp());
@@ -48,7 +47,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // Sua lista M3U padrão
   final String defaultUrl =
       'http://cdn4k.club/get.php?username=65pa7z&password=44k3io&type=m3u_plus&output=ts';
 
@@ -90,7 +88,7 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       } else {
         setState(() {
-          errorMessage = 'Erro ao carregar lista (Código: ${response.statusCode})';
+          errorMessage = 'Erro ao carregar lista (${response.statusCode})';
           isLoading = false;
         });
       }
@@ -134,7 +132,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   CircularProgressIndicator(),
                   SizedBox(height: 16),
-                  Text('Carregando lista de canais...'),
+                  Text('A carregar lista de canais...'),
                 ],
               ),
             )
@@ -143,7 +141,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Text(errorMessage, style: const TextStyle(color: Colors.redAccent)),
+                      Text(errorMessage,
+                          style: const TextStyle(color: Colors.redAccent)),
                       const SizedBox(height: 16),
                       ElevatedButton(
                         onPressed: loadM3uData,
@@ -155,9 +154,8 @@ class _HomeScreenState extends State<HomeScreen> {
               : isTVorTablet
                   ? Row(
                       children: [
-                        // Coluna de Categorias
                         SizedBox(
-                          width: 240,
+                          width: 250,
                           child: ListView.builder(
                             itemCount: groups.length,
                             itemBuilder: (context, index) {
@@ -165,7 +163,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               final isSelected = group == selectedGroup;
                               return ListTile(
                                 selected: isSelected,
-                                selectedTileColor: Colors.blueAccent.withOpacity(0.3),
+                                selectedTileColor:
+                                    Colors.blueAccent.withOpacity(0.3),
                                 title: Text(group, maxLines: 1),
                                 onTap: () => filterByGroup(group),
                               );
@@ -173,7 +172,6 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                         ),
                         const VerticalDivider(width: 1, color: Colors.white24),
-                        // Grid de Canais para TV
                         Expanded(
                           child: GridView.builder(
                             padding: const EdgeInsets.all(12),
@@ -204,7 +202,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// Tile interativo compatível com Toque e Controle Remoto
 class ChannelTile extends StatefulWidget {
   final Channel channel;
 
@@ -237,7 +234,9 @@ class _ChannelTileState extends State<ChannelTile> {
           duration: const Duration(milliseconds: 150),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
-            color: isFocused ? Colors.blueAccent.withOpacity(0.4) : const Color(0xFF1E222B),
+            color: isFocused
+                ? Colors.blueAccent.withOpacity(0.4)
+                : const Color(0xFF1E222B),
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
               color: isFocused ? Colors.blueAccent : Colors.transparent,
@@ -246,12 +245,13 @@ class _ChannelTileState extends State<ChannelTile> {
           ),
           child: Row(
             children: [
-              const Icon(Icons.tv, color: Colors.white70, size: 30),
+              const Icon(Icons.tv, color: Colors.white70, size: 28),
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
                   widget.channel.name,
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 14),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -264,7 +264,6 @@ class _ChannelTileState extends State<ChannelTile> {
   }
 }
 
-// Tela de Reprodução
 class PlayerScreen extends StatefulWidget {
   final String title;
   final String streamUrl;
@@ -276,37 +275,29 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  late VideoPlayerController _videoController;
-  ChewieController? _chewieController;
+  late VideoPlayerController _controller;
+  bool isInitialized = false;
   bool hasError = false;
 
   @override
   void initState() {
     super.initState();
-    initializePlayer();
-  }
-
-  Future<void> initializePlayer() async {
-    try {
-      _videoController = VideoPlayerController.networkUrl(Uri.parse(widget.streamUrl));
-      await _videoController.initialize();
-
-      _chewieController = ChewieController(
-        videoPlayerController: _videoController,
-        autoPlay: true,
-        isLive: true,
-        aspectRatio: _videoController.value.aspectRatio,
-      );
-      setState(() {});
-    } catch (e) {
-      setState(() => hasError = true);
-    }
+    _controller = VideoPlayerController.networkUrl(Uri.parse(widget.streamUrl))
+      ..initialize().then((_) {
+        setState(() {
+          isInitialized = true;
+        });
+        _controller.play();
+      }).catchError((_) {
+        setState(() {
+          hasError = true;
+        });
+      });
   }
 
   @override
   void dispose() {
-    _videoController.dispose();
-    _chewieController?.dispose();
+    _controller.dispose();
     super.dispose();
   }
 
@@ -320,16 +311,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
       body: Center(
         child: hasError
-            ? const Text('Erro ao reproduzir canal.', style: TextStyle(color: Colors.redAccent))
-            : _chewieController != null && _chewieController!.videoPlayerController.value.isInitialized
-                ? Chewie(controller: _chewieController!)
+            ? const Text('Erro ao reproduzir fluxo.',
+                style: TextStyle(color: Colors.redAccent))
+            : isInitialized
+                ? AspectRatio(
+                    aspectRatio: _controller.value.aspectRatio,
+                    child: VideoPlayer(_controller),
+                  )
                 : const CircularProgressIndicator(),
       ),
     );
   }
 }
 
-// Parser M3U isolado para não travar a tela
 List<Channel> parseM3U(String content) {
   final List<Channel> list = [];
   final lines = const LineSplitter().convert(content);
@@ -338,7 +332,8 @@ List<Channel> parseM3U(String content) {
   String group = 'Geral';
   String logo = '';
 
-  final regExp = RegExp(r'#EXTINF:.*?(?:group-title="([^"]*)")?.*?(?:tvg-logo="([^"]*)")?,(.*)');
+  final regExp = RegExp(
+      r'#EXTINF:.*?(?:group-title="([^"]*)")?.*?(?:tvg-logo="([^"]*)")?,(.*)');
 
   for (final line in lines) {
     final trimmed = line.trim();
