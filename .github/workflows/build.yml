@@ -22,27 +22,26 @@ jobs:
       - name: Instalar Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.x'
+          flutter-version: '3.22.x'
           channel: 'stable'
 
-      - name: Recriar projeto com Android v2
+      - name: Recriar estrutura Flutter Android
         run: |
-          flutter create --org com.exemplo --project-name iptv_player .
+          rm -rf android
+          flutter create --org com.exemplo --project-name iptv_player --platforms=android .
           flutter pub get
 
-      - name: Configurar Permissões para TV e HTTP
+      - name: Configurar Permissões de Rede e TV
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          # Permite tráfego HTTP puro (necessário para streams de IPTV)
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' $MANIFEST
-          # Adiciona permissões de rede e desativa obrigatoriedade de ecrã tátil para TV
           sed -i '/<manifest/a \    <uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>\n    <uses-feature android:name="android.hardware.touchscreen" android:required="false"\/>\n    <uses-feature android:name="android.software.leanback" android:required="false"\/>' $MANIFEST
 
       - name: Compilar APK
-        run: flutter build apk --release
+        run: flutter build apk --debug
 
       - name: Disponibilizar APK para Download
         uses: actions/upload-artifact@v4
         with:
-          name: iptv-player-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: iptv-player-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
