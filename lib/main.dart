@@ -7,6 +7,12 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 
+const Map<String, String> kIptvHeaders = {
+  'User-Agent': 'IPTVSmartersPlayer/1.0 (Linux; Android 11)',
+  'Accept': '*/*',
+  'Connection': 'keep-alive',
+};
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setSystemUIOverlayStyle(
@@ -30,6 +36,8 @@ class UnexVisionApp extends StatelessWidget {
         ...WidgetsApp.defaultShortcuts,
         const SingleActivator(LogicalKeyboardKey.select): const ActivateIntent(),
         const SingleActivator(LogicalKeyboardKey.enter): const ActivateIntent(),
+        const SingleActivator(LogicalKeyboardKey.numpadEnter):
+            const ActivateIntent(),
         const SingleActivator(LogicalKeyboardKey.gameButtonA):
             const ActivateIntent(),
       },
@@ -42,21 +50,61 @@ class UnexVisionApp extends StatelessWidget {
           surface: Color(0xFF12151F),
         ),
       ),
-      home: const LoginGatewayScreen(),
+      home: const LoginGatewayScreen(allowAutoLogin: true),
     );
   }
 }
 
 // =============================================================================
-// MODELOS DE DADOS E CLASSIFICADOR DE CONTEÚDO / QUALIDADE
+// ARMAZENAMENTO DE SESSÃO VERIFICADA (SÓ SALVA APÓS LOGIN BEM-SUCEDIDO)
+// =============================================================================
+class SessionStorage {
+  // Nome novo para ignorar qualquer cache/usuário antigo salvo em versões anteriores
+  static File get _sessionFile {
+    return File('${Directory.systemTemp.path}/unex_verified_session_v3.json');
+  }
+
+  static Future<Map<String, dynamic>?> loadVerifiedSession() async {
+    try {
+      final file = _sessionFile;
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final data = jsonDecode(content) as Map<String, dynamic>;
+        if (data['verified'] == true) {
+          return data;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static Future<void> saveVerifiedSession(Map<String, dynamic> data) async {
+    try {
+      data['verified'] = true;
+      await _sessionFile.writeAsString(jsonEncode(data));
+    } catch (_) {}
+  }
+
+  static Future<void> clearSession() async {
+    try {
+      final file = _sessionFile;
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {}
+  }
+}
+
+// =============================================================================
+// MODELOS DE DADOS
 // =============================================================================
 enum ContentType { live, movie, series }
 
 class StreamItem {
   final String id;
   final String name;
-  final String cleanName; // Nome sem tags SD/HD/FHD/4K para agrupar qualidades
-  final String qualityTag; // SD, HD, FHD, 4K ou AUTO
+  final String cleanName;
+  final String qualityTag;
   final String group;
   final String logo;
   final String url;
@@ -77,61 +125,153 @@ class StreamItem {
 }
 
 // =============================================================================
-// TELA 1: LOGIN INTELIGENTE (DNS / URL + USUÁRIO + SENHA)
+// TELA 1: LOGIN LIMPO E SEM LOOP DE CONEXÃO
 // =============================================================================
 class LoginGatewayScreen extends StatefulWidget {
-  const LoginGatewayScreen({super.key});
+  final bool allowAutoLogin;
+  final String initialDns;
+  final String initialUser;
+  final String initialPass;
+  final String initialM3u;
+  final bool initialDirectM3uMode;
+  final String? errorBannerMessage;
+
+  const LoginGatewayScreen({
+    super.key,
+    this.allowAutoLogin = false,
+    this.initialDns = '',
+    this.initialUser = '',
+    this.initialPass = '',
+    this.initialM3u = '',
+    this.initialDirectM3uMode = false,
+    this.errorBannerMessage,
+  });
 
   @override
   State<LoginGatewayScreen> createState() => _LoginGatewayScreenState();
 }
 
 class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
-  final TextEditingController _dnsController =
-      TextEditingController(text: 'http://cdn4k.club');
-  final TextEditingController _userController =
-      TextEditingController(text: '65pa7z');
-  final TextEditingController _passController =
-      TextEditingController(text: '44k3io');
+  late final TextEditingController _dnsController;
+  late final TextEditingController _userController;
+  late final TextEditingController _passController;
+  late final TextEditingController _m3uController;
 
   bool _obscurePass = true;
-  bool _autoConnect = true;
+  late bool _useDirectM3uMode;
+  bool _rememberMe = true;
+  bool _checkingSavedSession = false;
 
   @override
   void initState() {
     super.initState();
-    // Entra direto se os dados padrão estiverem preenchidos
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_autoConnect &&
-          _dnsController.text.isNotEmpty &&
-          _userController.text.isNotEmpty) {
-        _connectToServer();
+    _dnsController = TextEditingController(text: widget.initialDns);
+    _userController = TextEditingController(text: widget.initialUser);
+    _passController = TextEditingController(text: widget.initialPass);
+    _m3uController = TextEditingController(text: widget.initialM3u);
+    _useDirectM3uMode = widget.initialDirectM3uMode;
+
+    if (widget.allowAutoLogin) {
+      _checkingSavedSession = true;
+      _checkAndRestoreVerifiedSession();
+    }
+  }
+
+  @override
+  void dispose() {
+    _dnsController.dispose();
+    _userController.dispose();
+    _passController.dispose();
+    _m3uController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _checkAndRestoreVerifiedSession() async {
+    final saved = await SessionStorage.loadVerifiedSession();
+    if (!mounted) return;
+
+    if (saved != null) {
+      final mode = saved['mode']?.toString() ?? 'xtream';
+      if (mode == 'm3u') {
+        final directUrl = saved['m3uUrl']?.toString() ?? '';
+        if (directUrl.isNotEmpty) {
+          _openDashboard(
+            directM3uUrl: directUrl,
+            rememberSession: true,
+          );
+          return;
+        }
+      } else {
+        final dns = saved['dns']?.toString() ?? '';
+        final user = saved['user']?.toString() ?? '';
+        final pass = saved['pass']?.toString() ?? '';
+        if (dns.isNotEmpty && user.isNotEmpty && pass.isNotEmpty) {
+          _openDashboard(
+            dns: dns,
+            user: user,
+            pass: pass,
+            rememberSession: true,
+          );
+          return;
+        }
       }
+    }
+
+    setState(() {
+      _checkingSavedSession = false;
     });
   }
 
-  void _connectToServer() {
-    String dns = _dnsController.text.trim();
-    final user = _userController.text.trim();
-    final pass = _passController.text.trim();
+  void _handleLoginSubmit() {
+    FocusScope.of(context).unfocus();
 
-    if (dns.isEmpty || user.isEmpty || pass.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Preencha a URL/DNS, Usuário e Senha.'),
-          backgroundColor: Colors.redAccent,
-        ),
+    if (_useDirectM3uMode) {
+      String rawM3u = _m3uController.text.trim();
+      if (rawM3u.isEmpty) {
+        _showErrorSnackBar('Cole ou digite o link M3U completo.');
+        return;
+      }
+      if (!rawM3u.startsWith('http://') && !rawM3u.startsWith('https://')) {
+        rawM3u = 'http://$rawM3u';
+      }
+
+      _openDashboard(
+        directM3uUrl: rawM3u,
+        rememberSession: _rememberMe,
       );
-      return;
-    }
+    } else {
+      String dns = _dnsController.text.trim();
+      final user = _userController.text.trim();
+      final pass = _passController.text.trim();
 
-    if (!dns.startsWith('http://') && !dns.startsWith('https://')) {
-      dns = 'http://$dns';
-    }
-    if (dns.endsWith('/')) {
-      dns = dns.substring(0, dns.length - 1);
-    }
+      if (dns.isEmpty || user.isEmpty || pass.isEmpty) {
+        _showErrorSnackBar('Preencha a URL (DNS), o Usuário e a Senha.');
+        return;
+      }
 
+      if (!dns.startsWith('http://') && !dns.startsWith('https://')) {
+        dns = 'http://$dns';
+      }
+      while (dns.endsWith('/')) {
+        dns = dns.substring(0, dns.length - 1);
+      }
+
+      _openDashboard(
+        dns: dns,
+        user: user,
+        pass: pass,
+        rememberSession: _rememberMe,
+      );
+    }
+  }
+
+  void _openDashboard({
+    String dns = '',
+    String user = '',
+    String pass = '',
+    String? directM3uUrl,
+    required bool rememberSession,
+  }) {
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
@@ -139,13 +279,42 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
           serverDns: dns,
           username: user,
           password: pass,
+          directM3uUrl: directM3uUrl,
+          rememberSession: rememberSession,
         ),
+      ),
+    );
+  }
+
+  void _clearAllFields() async {
+    await SessionStorage.clearSession();
+    setState(() {
+      _dnsController.clear();
+      _userController.clear();
+      _passController.clear();
+      _m3uController.clear();
+    });
+  }
+
+  void _showErrorSnackBar(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: Colors.redAccent,
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_checkingSavedSession) {
+      return const Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(color: Color(0xFF00E5FF)),
+        ),
+      );
+    }
+
     return Scaffold(
       body: Container(
         decoration: const BoxDecoration(
@@ -159,16 +328,16 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
+              constraints: const BoxConstraints(maxWidth: 440),
               child: Container(
                 padding: const EdgeInsets.all(28),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF12151F).withOpacity(0.92),
+                  color: const Color(0xFF12151F).withOpacity(0.95),
                   borderRadius: BorderRadius.circular(24),
                   border: Border.all(color: Colors.white10),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.5),
+                      color: Colors.black.withOpacity(0.55),
                       blurRadius: 30,
                     )
                   ],
@@ -187,7 +356,7 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
                       child: const Icon(Icons.live_tv_rounded,
                           color: Colors.black, size: 36),
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 14),
                     const Text(
                       'UNEX VISION',
                       style: TextStyle(
@@ -197,52 +366,173 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    const Text(
-                      'Conecte sua lista via DNS, Usuário e Senha',
-                      style: TextStyle(color: Colors.white54, fontSize: 13),
+                    Text(
+                      _useDirectM3uMode
+                          ? 'Cole ou digite o link M3U completo da sua lista'
+                          : 'Informe a URL (DNS), Usuário e Senha da sua lista',
+                      textAlign: TextAlign.center,
+                      style:
+                          const TextStyle(color: Colors.white54, fontSize: 13),
                     ),
-                    const SizedBox(height: 28),
-                    _buildInput(
-                      controller: _dnsController,
-                      label: 'URL / DNS do Servidor',
-                      hint: 'Ex: http://cdn4k.club',
-                      icon: Icons.dns_rounded,
-                    ),
-                    const SizedBox(height: 14),
-                    _buildInput(
-                      controller: _userController,
-                      label: 'Usuário',
-                      hint: 'Digite seu usuário',
-                      icon: Icons.person_outline_rounded,
-                    ),
-                    const SizedBox(height: 14),
-                    TextField(
-                      controller: _passController,
-                      obscureText: _obscurePass,
-                      decoration: InputDecoration(
-                        labelText: 'Senha',
-                        prefixIcon: const Icon(Icons.lock_outline_rounded,
-                            color: Color(0xFF00E5FF)),
-                        suffixIcon: IconButton(
-                          icon: Icon(_obscurePass
-                              ? Icons.visibility_off
-                              : Icons.visibility),
-                          onPressed: () =>
-                              setState(() => _obscurePass = !_obscurePass),
+
+                    // Aviso caso o usuário tenha voltado de um erro de conexão
+                    if (widget.errorBannerMessage != null) ...[
+                      const SizedBox(height: 16),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.redAccent.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                              color: Colors.redAccent.withOpacity(0.5)),
                         ),
-                        filled: true,
-                        fillColor: const Color(0xFF08090E),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: BorderSide.none,
+                        child: Row(
+                          children: [
+                            const Icon(Icons.error_outline,
+                                color: Colors.redAccent, size: 20),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                widget.errorBannerMessage!,
+                                style: const TextStyle(
+                                    fontSize: 12, color: Colors.white),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
+                    ],
+
+                    const SizedBox(height: 22),
+
+                    if (!_useDirectM3uMode) ...[
+                      _buildInput(
+                        controller: _dnsController,
+                        label: 'URL / DNS do Servidor',
+                        hint: 'Ex: http://cdn4k.club',
+                        icon: Icons.dns_rounded,
+                        textInputAction: TextInputAction.next,
+                      ),
+                      const SizedBox(height: 14),
+                      _buildInput(
+                        controller: _userController,
+                        label: 'Usuário',
+                        hint: 'Digite seu usuário',
+                        icon: Icons.person_outline_rounded,
+                        textInputAction: TextInputAction.next,
+                      ),
+                      const SizedBox(height: 14),
+                      TextField(
+                        controller: _passController,
+                        obscureText: _obscurePass,
+                        textInputAction: TextInputAction.done,
+                        onSubmitted: (_) => _handleLoginSubmit(),
+                        decoration: InputDecoration(
+                          labelText: 'Senha',
+                          hintText: 'Digite sua senha',
+                          prefixIcon: const Icon(Icons.lock_outline_rounded,
+                              color: Color(0xFF00E5FF)),
+                          suffixIcon: IconButton(
+                            icon: Icon(_obscurePass
+                                ? Icons.visibility_off
+                                : Icons.visibility),
+                            onPressed: () =>
+                                setState(() => _obscurePass = !_obscurePass),
+                          ),
+                          filled: true,
+                          fillColor: const Color(0xFF08090E),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: BorderSide.none,
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: const BorderSide(
+                                color: Color(0xFF00E5FF), width: 1.5),
+                          ),
+                        ),
+                      ),
+                    ] else ...[
+                      _buildInput(
+                        controller: _m3uController,
+                        label: 'Link / Código M3U Completo',
+                        hint: 'http://.../get.php?username=...&password=...',
+                        icon: Icons.link_rounded,
+                        textInputAction: TextInputAction.done,
+                        onSubmitted: (_) => _handleLoginSubmit(),
+                      ),
+                    ],
+
+                    const SizedBox(height: 12),
+
+                    // Opção Lembrar Acesso + Botão Limpar Campos
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        TVFocusableItem(
+                          autoScroll: false,
+                          onSelect: () =>
+                              setState(() => _rememberMe = !_rememberMe),
+                          builder: (context, isFocused) => Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 4),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: isFocused
+                                    ? const Color(0xFF00E5FF)
+                                    : Colors.transparent,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  _rememberMe
+                                      ? Icons.check_box_rounded
+                                      : Icons.check_box_outline_blank_rounded,
+                                  color: const Color(0xFF00E5FF),
+                                  size: 18,
+                                ),
+                                const SizedBox(width: 6),
+                                const Text('Lembrar acesso',
+                                    style: TextStyle(
+                                        fontSize: 12, color: Colors.white70)),
+                              ],
+                            ),
+                          ),
+                        ),
+                        TVFocusableItem(
+                          autoScroll: false,
+                          onSelect: _clearAllFields,
+                          builder: (context, isFocused) => Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: isFocused
+                                    ? Colors.redAccent
+                                    : Colors.transparent,
+                              ),
+                            ),
+                            child: const Text(
+                              'Limpar campos',
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.white54),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 26),
+
+                    const SizedBox(height: 18),
+
                     SizedBox(
                       width: double.infinity,
                       child: TVFocusableItem(
-                        onSelect: _connectToServer,
+                        autoScroll: false,
+                        onSelect: _handleLoginSubmit,
                         builder: (context, isFocused) => Container(
                           padding: const EdgeInsets.symmetric(vertical: 15),
                           decoration: BoxDecoration(
@@ -253,19 +543,76 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
                             border: Border.all(
                               color:
                                   isFocused ? Colors.white : Colors.transparent,
-                              width: 2,
+                              width: 2.5,
                             ),
+                            boxShadow: isFocused
+                                ? [
+                                    BoxShadow(
+                                      color: const Color(0xFF00E5FF)
+                                          .withOpacity(0.4),
+                                      blurRadius: 14,
+                                    )
+                                  ]
+                                : null,
                           ),
                           child: const Center(
                             child: Text(
-                              'ENTRAR E CARREGAR LISTA',
+                              'CONECTAR',
                               style: TextStyle(
                                 color: Colors.black,
                                 fontWeight: FontWeight.w900,
-                                letterSpacing: 1,
+                                letterSpacing: 1.2,
                               ),
                             ),
                           ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // BOTÃO DISCRETO PARA ALTERNAR PARA CÓDIGO / LINK M3U DIRETO
+                    TVFocusableItem(
+                      autoScroll: false,
+                      onSelect: () {
+                        setState(() {
+                          _useDirectM3uMode = !_useDirectM3uMode;
+                        });
+                      },
+                      builder: (context, isFocused) => Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color:
+                              isFocused ? Colors.white10 : Colors.transparent,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: isFocused
+                                ? const Color(0xFF00E5FF)
+                                : Colors.transparent,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              _useDirectM3uMode
+                                  ? Icons.vpn_key_outlined
+                                  : Icons.link_rounded,
+                              size: 15,
+                              color: Colors.white54,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              _useDirectM3uMode
+                                  ? 'Usar acesso com URL, Usuário e Senha'
+                                  : 'Inserir link M3U diretamente',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Colors.white54,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ),
@@ -284,9 +631,13 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
     required String label,
     required String hint,
     required IconData icon,
+    TextInputAction? textInputAction,
+    ValueChanged<String>? onSubmitted,
   }) {
     return TextField(
       controller: controller,
+      textInputAction: textInputAction,
+      onSubmitted: onSubmitted,
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
@@ -296,6 +647,10 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
           borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(color: Color(0xFF00E5FF), width: 1.5),
         ),
       ),
     );
@@ -309,12 +664,16 @@ class MainDashboard extends StatefulWidget {
   final String serverDns;
   final String username;
   final String password;
+  final String? directM3uUrl;
+  final bool rememberSession;
 
   const MainDashboard({
     super.key,
     required this.serverDns,
     required this.username,
     required this.password,
+    this.directM3uUrl,
+    this.rememberSession = true,
   });
 
   @override
@@ -322,7 +681,6 @@ class MainDashboard extends StatefulWidget {
 }
 
 class _MainDashboardState extends State<MainDashboard> {
-  // Listas e Contadores
   List<StreamItem> allItems = [];
   List<StreamItem> filteredItems = [];
   Map<String, int> categoryCounts = {};
@@ -332,40 +690,42 @@ class _MainDashboardState extends State<MainDashboard> {
   int totalMoviesCount = 0;
   int totalSeriesCount = 0;
 
-  // Estados de Filtro
-  ContentType? activeContentType; // null = Todos os tipos
+  ContentType? activeContentType;
   String selectedCategory = 'Todos';
   String searchQuery = '';
 
-  // Favoritos, Histórico e Controle Parental
   final Set<String> favoriteIds = {};
   final List<StreamItem> recentItems = [];
   String parentalPin = '0000';
   bool adultUnlocked = false;
 
-  // Status da Conta e Rede
   String accountStatus = 'Ativo';
   String accountExpDate = '';
-  double lastMeasuredSpeedMbps = 18.5; // Estimativa inicial para o Anti-Travamento
+  double lastMeasuredSpeedMbps = 18.5;
 
   bool isLoading = true;
   String errorMessage = '';
 
-  // Mini Player / PiP Interno
   StreamItem? activeItem;
   VideoPlayerController? _previewController;
   bool isPreviewReady = false;
   bool isPreviewError = false;
   bool isMiniPipFloating = false;
 
-  // Sleep Timer
   Timer? _sleepTimer;
   int? _sleepMinutesRemaining;
 
   final TextEditingController _searchController = TextEditingController();
 
-  String get m3uUrl =>
-      '${widget.serverDns}/get.php?username=${widget.username}&password=${widget.password}&type=m3u_plus&output=ts';
+  bool get isDirectM3u =>
+      widget.directM3uUrl != null && widget.directM3uUrl!.trim().isNotEmpty;
+
+  String get m3uUrl {
+    if (isDirectM3u) {
+      return widget.directM3uUrl!.trim();
+    }
+    return '${widget.serverDns}/get.php?username=${widget.username}&password=${widget.password}&type=m3u_plus&output=ts';
+  }
 
   @override
   void initState() {
@@ -381,30 +741,82 @@ class _MainDashboardState extends State<MainDashboard> {
     super.dispose();
   }
 
+  // Volta para a tela de login mantendo os dados nos campos e BLOQUEANDO auto-login
+  Future<void> _returnToLoginForEditing({String? errorBanner}) async {
+    _previewController?.pause();
+    await SessionStorage.clearSession();
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LoginGatewayScreen(
+          allowAutoLogin: false,
+          initialDns: widget.serverDns,
+          initialUser: widget.username,
+          initialPass: widget.password,
+          initialM3u: widget.directM3uUrl ?? '',
+          initialDirectM3uMode: isDirectM3u,
+          errorBannerMessage: errorBanner,
+        ),
+      ),
+    );
+  }
+
   Future<void> _loadAccountInfoAndPlaylist() async {
     setState(() {
       isLoading = true;
       errorMessage = '';
     });
 
-    // 1. Consulta opcional da API Xtream para pegar data de expiração da conta
-    _fetchXtreamAccountStatus();
+    if (!isDirectM3u) {
+      _fetchXtreamAccountStatus();
+    }
 
-    // 2. Baixa e mede a taxa de transferência para calibrar o Anti-Travamento
     try {
       final stopwatch = Stopwatch()..start();
-      final response =
-          await http.get(Uri.parse(m3uUrl)).timeout(const Duration(seconds: 30));
+      final response = await http
+          .get(Uri.parse(m3uUrl), headers: kIptvHeaders)
+          .timeout(const Duration(seconds: 30));
       stopwatch.stop();
 
       if (response.statusCode == 200) {
+        final bodyText = utf8.decode(response.bodyBytes, allowMalformed: true);
+        final parsed = await compute(parseM3UAdvanced, bodyText);
+
+        if (parsed.isEmpty) {
+          await SessionStorage.clearSession();
+          if (!mounted) return;
+          setState(() {
+            errorMessage =
+                'A lista retornou vazia ou os dados de Usuário/Senha estão incorretos.';
+            isLoading = false;
+          });
+          return;
+        }
+
+        // SÓ SALVA A SESSÃO AGORA QUE SABEMOS QUE A LISTA É VÁLIDA!
+        if (widget.rememberSession) {
+          if (isDirectM3u) {
+            await SessionStorage.saveVerifiedSession({
+              'mode': 'm3u',
+              'm3uUrl': widget.directM3uUrl,
+            });
+          } else {
+            await SessionStorage.saveVerifiedSession({
+              'mode': 'xtream',
+              'dns': widget.serverDns,
+              'user': widget.username,
+              'pass': widget.password,
+            });
+          }
+        }
+
         final bytes = response.bodyBytes.length;
         final seconds = stopwatch.elapsedMilliseconds / 1000.0;
         if (seconds > 0.1 && bytes > 10000) {
-          lastMeasuredSpeedMbps = ((bytes * 8) / (seconds * 1000000)).clamp(1.0, 300.0);
+          lastMeasuredSpeedMbps =
+              ((bytes * 8) / (seconds * 1000000)).clamp(1.0, 300.0);
         }
-
-        final parsed = await compute(parseM3UAdvanced, response.body);
 
         int live = 0;
         int movies = 0;
@@ -429,16 +841,20 @@ class _MainDashboardState extends State<MainDashboard> {
           _startPreview(parsed.first);
         }
       } else {
+        await SessionStorage.clearSession();
+        if (!mounted) return;
         setState(() {
           errorMessage =
-              'Servidor recusou a conexão (Código ${response.statusCode}). Verifique usuário e senha.';
+              'O servidor recusou o acesso (Erro HTTP ${response.statusCode}). Verifique URL, Usuário e Senha.';
           isLoading = false;
         });
       }
     } catch (e) {
+      await SessionStorage.clearSession();
+      if (!mounted) return;
       setState(() {
         errorMessage =
-            'Falha ao conectar em ${widget.serverDns}.\nVerifique o DNS, sua internet ou os dados de acesso.';
+            'Não foi possível conectar ao servidor informado.\nVerifique se o endereço DNS/URL está correto e se há conexão com a internet.';
         isLoading = false;
       });
     }
@@ -448,8 +864,9 @@ class _MainDashboardState extends State<MainDashboard> {
     try {
       final apiUrl =
           '${widget.serverDns}/player_api.php?username=${widget.username}&password=${widget.password}';
-      final res =
-          await http.get(Uri.parse(apiUrl)).timeout(const Duration(seconds: 8));
+      final res = await http
+          .get(Uri.parse(apiUrl), headers: kIptvHeaders)
+          .timeout(const Duration(seconds: 8));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         final userInfo = data['user_info'];
@@ -475,7 +892,6 @@ class _MainDashboardState extends State<MainDashboard> {
   }
 
   void _rebuildCategoriesAndFilter() {
-    // Filtra pelo tipo principal (Todos, Ao Vivo, Filmes, Séries)
     final baseList = activeContentType == null
         ? allItems
         : allItems.where((i) => i.type == activeContentType).toList();
@@ -484,8 +900,8 @@ class _MainDashboardState extends State<MainDashboard> {
       'Todos': baseList.length,
       'Favoritos': baseList.where((i) => favoriteIds.contains(i.id)).length,
       'Recentes': recentItems
-          .where((i) =>
-              activeContentType == null || i.type == activeContentType)
+          .where(
+              (i) => activeContentType == null || i.type == activeContentType)
           .length,
     };
 
@@ -581,6 +997,7 @@ class _MainDashboardState extends State<MainDashboard> {
           keyboardType: TextInputType.number,
           obscureText: true,
           maxLength: 4,
+          autofocus: true,
           decoration: const InputDecoration(
             labelText: 'Digite o PIN (Padrão: 0000)',
           ),
@@ -631,7 +1048,6 @@ class _MainDashboardState extends State<MainDashboard> {
     });
   }
 
-  // Busca todas as qualidades disponíveis (SD, HD, FHD, 4K) do mesmo canal
   List<StreamItem> _findQualityVariants(StreamItem item) {
     final variants = allItems
         .where((i) =>
@@ -664,7 +1080,10 @@ class _MainDashboardState extends State<MainDashboard> {
     });
 
     final old = _previewController;
-    _previewController = VideoPlayerController.networkUrl(Uri.parse(item.url));
+    _previewController = VideoPlayerController.networkUrl(
+      Uri.parse(item.url),
+      httpHeaders: kIptvHeaders,
+    );
     await old?.dispose();
 
     try {
@@ -705,9 +1124,6 @@ class _MainDashboardState extends State<MainDashboard> {
     });
   }
 
-  // ===========================================================================
-  // MODAL DISCRETO DE TESTE DE VELOCIDADE DA INTERNET
-  // ===========================================================================
   void _showSpeedTestModal() {
     showDialog(
       context: context,
@@ -720,9 +1136,6 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
-  // ===========================================================================
-  // SLEEP TIMER (DESLIGAMENTO AUTOMÁTICO)
-  // ===========================================================================
   void _showSleepTimerDialog() {
     showDialog(
       context: context,
@@ -740,24 +1153,59 @@ class _MainDashboardState extends State<MainDashboard> {
           mainAxisSize: MainAxisSize.min,
           children: [
             for (final mins in [15, 30, 60, 90, 120])
-              ListTile(
-                leading: const Icon(Icons.timer_outlined),
-                title: Text('Desligar em $mins minutos'),
-                onTap: () {
+              TVFocusableItem(
+                onSelect: () {
                   _setSleepTimer(mins);
                   Navigator.pop(context);
                 },
+                builder: (context, isFocused) => Container(
+                  margin: const EdgeInsets.symmetric(vertical: 3),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: isFocused ? Colors.white10 : Colors.transparent,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: isFocused
+                          ? const Color(0xFF00E5FF)
+                          : Colors.transparent,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.timer_outlined, size: 20),
+                      const SizedBox(width: 12),
+                      Text('Desligar em $mins minutos'),
+                    ],
+                  ),
+                ),
               ),
             if (_sleepMinutesRemaining != null)
-              ListTile(
-                leading: const Icon(Icons.cancel_outlined, color: Colors.redAccent),
-                title: const Text('Cancelar Timer Ativo',
-                    style: TextStyle(color: Colors.redAccent)),
-                onTap: () {
+              TVFocusableItem(
+                onSelect: () {
                   _sleepTimer?.cancel();
                   setState(() => _sleepMinutesRemaining = null);
                   Navigator.pop(context);
                 },
+                builder: (context, isFocused) => Container(
+                  margin: const EdgeInsets.only(top: 6),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: isFocused ? Colors.redAccent : Colors.transparent,
+                    ),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.cancel_outlined, color: Colors.redAccent),
+                      SizedBox(width: 12),
+                      Text('Cancelar Timer Ativo',
+                          style: TextStyle(color: Colors.redAccent)),
+                    ],
+                  ),
+                ),
               ),
           ],
         ),
@@ -798,8 +1246,6 @@ class _MainDashboardState extends State<MainDashboard> {
                     : isTV
                         ? _buildTVLayout()
                         : _buildMobileLayout(),
-
-            // JANELA FLUTUANTE PIP (PICTURE-IN-PICTURE INTERNO)
             if (isMiniPipFloating && activeItem != null)
               Positioned(
                 bottom: 20,
@@ -812,8 +1258,8 @@ class _MainDashboardState extends State<MainDashboard> {
                     width: isTV ? 320 : 230,
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(14),
-                      border:
-                          Border.all(color: const Color(0xFF00E5FF), width: 1.5),
+                      border: Border.all(
+                          color: const Color(0xFF00E5FF), width: 1.5),
                     ),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
@@ -844,27 +1290,22 @@ class _MainDashboardState extends State<MainDashboard> {
                                       fontWeight: FontWeight.bold),
                                 ),
                               ),
-                              InkWell(
-                                onTap: () {
+                              TVIconButton(
+                                icon: Icons.open_in_full_rounded,
+                                tooltip: 'Tela Cheia',
+                                color: const Color(0xFF00E5FF),
+                                onPressed: () {
                                   setState(() => isMiniPipFloating = false);
                                   _openFullScreen(activeItem!);
                                 },
-                                child: const Padding(
-                                  padding: EdgeInsets.all(4.0),
-                                  child: Icon(Icons.open_in_full_rounded,
-                                      size: 16, color: Color(0xFF00E5FF)),
-                                ),
                               ),
-                              InkWell(
-                                onTap: () {
+                              TVIconButton(
+                                icon: Icons.close_rounded,
+                                tooltip: 'Fechar PiP',
+                                onPressed: () {
                                   _previewController?.pause();
                                   setState(() => isMiniPipFloating = false);
                                 },
-                                child: const Padding(
-                                  padding: EdgeInsets.all(4.0),
-                                  child: Icon(Icons.close_rounded,
-                                      size: 16, color: Colors.white70),
-                                ),
                               ),
                             ],
                           ),
@@ -880,9 +1321,6 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
-  // ===========================================================================
-  // BARRA SUPERIOR DE RESUMO DA VARIEDADE + ÍCONE DISCRETO DE SPEED TEST
-  // ===========================================================================
   Widget _buildTopNavigationAndStatsBar({required bool isTV}) {
     return Container(
       padding: EdgeInsets.symmetric(
@@ -910,13 +1348,12 @@ class _MainDashboardState extends State<MainDashboard> {
               const Text(
                 'UNEX VISION',
                 style: TextStyle(
-                  fontSize: 17,
+                  fontSize: 16,
                   fontWeight: FontWeight.w900,
                   letterSpacing: 1.4,
                 ),
               ),
-              const SizedBox(width: 14),
-              // Badge de Total Geral da Lista
+              const SizedBox(width: 10),
               Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -927,7 +1364,7 @@ class _MainDashboardState extends State<MainDashboard> {
                       color: const Color(0xFF00E5FF).withOpacity(0.3)),
                 ),
                 child: Text(
-                  'Total: ${allItems.length} itens',
+                  'Total: ${allItems.length}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.bold,
@@ -953,7 +1390,7 @@ class _MainDashboardState extends State<MainDashboard> {
               const Spacer(),
               if (_sleepMinutesRemaining != null)
                 Padding(
-                  padding: const EdgeInsets.only(right: 8.0),
+                  padding: const EdgeInsets.only(right: 6.0),
                   child: Chip(
                     backgroundColor: Colors.amber.withOpacity(0.2),
                     label: Text('${_sleepMinutesRemaining}m',
@@ -961,41 +1398,31 @@ class _MainDashboardState extends State<MainDashboard> {
                             const TextStyle(fontSize: 11, color: Colors.amber)),
                   ),
                 ),
-              // BOTÃO DISCRETO DE TESTE DE VELOCIDADE COM ÍCONE CONDIZENTE
-              IconButton(
+              // BOTÃO DISCRETO DE TESTE DE VELOCIDADE (NAVEGÁVEL POR CONTROLE E TOQUE)
+              TVIconButton(
                 tooltip: 'Teste de Velocidade',
-                icon: const Icon(Icons.speed_rounded,
-                    color: Color(0xFF00E5FF), size: 22),
+                icon: Icons.speed_rounded,
+                color: const Color(0xFF00E5FF),
                 onPressed: _showSpeedTestModal,
               ),
-              IconButton(
+              TVIconButton(
                 tooltip: 'Timer de Sono',
-                icon: const Icon(Icons.bedtime_outlined,
-                    color: Colors.white70, size: 20),
+                icon: Icons.bedtime_outlined,
                 onPressed: _showSleepTimerDialog,
               ),
-              IconButton(
+              TVIconButton(
                 tooltip: 'Atualizar Lista',
-                icon: const Icon(Icons.refresh_rounded,
-                    color: Colors.white70, size: 21),
+                icon: Icons.refresh_rounded,
                 onPressed: _loadAccountInfoAndPlaylist,
               ),
-              IconButton(
-                tooltip: 'Trocar Conta / DNS',
-                icon: const Icon(Icons.logout_rounded,
-                    color: Colors.white70, size: 20),
-                onPressed: () {
-                  Navigator.pushReplacement(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) => const LoginGatewayScreen()),
-                  );
-                },
+              TVIconButton(
+                tooltip: 'Trocar Conta / Sair',
+                icon: Icons.logout_rounded,
+                onPressed: () => _returnToLoginForEditing(),
               ),
             ],
           ),
           const SizedBox(height: 10),
-          // SELETOR DE VARIEDADE (TODOS / TV AO VIVO / FILMES / SÉRIES) COM CONTADORES
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -1100,9 +1527,6 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
-  // ===========================================================================
-  // LAYOUT TV / TV BOX (3 COLUNAS COM CONTADORES EM CADA CATEGORIA)
-  // ===========================================================================
   Widget _buildTVLayout() {
     return Column(
       children: [
@@ -1110,7 +1534,7 @@ class _MainDashboardState extends State<MainDashboard> {
         Expanded(
           child: Row(
             children: [
-              // 1. COLUNA DE CATEGORIAS COM QUANTIDADE EM CADA UMA
+              // COLUNA 1: CATEGORIAS COM ROLAGEM AUTOMÁTICA NO CONTROLE REMOTO
               Container(
                 width: 260,
                 decoration: const BoxDecoration(
@@ -1161,6 +1585,7 @@ class _MainDashboardState extends State<MainDashboard> {
                                           ? const Color(0xFF00E5FF)
                                               .withOpacity(0.4)
                                           : Colors.transparent,
+                                  width: isFocused ? 2 : 1,
                                 ),
                               ),
                               child: Row(
@@ -1218,7 +1643,7 @@ class _MainDashboardState extends State<MainDashboard> {
                 ),
               ),
 
-              // 2. GRADE CENTRAL DE CONTEÚDOS
+              // COLUNA 2: BUSCA E GRADE DE CANAIS
               Expanded(
                 child: Column(
                   children: [
@@ -1240,16 +1665,27 @@ class _MainDashboardState extends State<MainDashboard> {
                                   searchQuery = v;
                                   _applyItemsFilter();
                                 },
-                                decoration: const InputDecoration(
+                                decoration: InputDecoration(
                                   hintText:
                                       'Pesquisar canal, filme ou série...',
-                                  hintStyle: TextStyle(
+                                  hintStyle: const TextStyle(
                                       fontSize: 13, color: Colors.white38),
-                                  prefixIcon: Icon(Icons.search,
+                                  prefixIcon: const Icon(Icons.search,
                                       color: Color(0xFF00E5FF), size: 19),
+                                  suffixIcon: searchQuery.isNotEmpty
+                                      ? IconButton(
+                                          icon: const Icon(Icons.clear,
+                                              size: 18),
+                                          onPressed: () {
+                                            _searchController.clear();
+                                            searchQuery = '';
+                                            _applyItemsFilter();
+                                          },
+                                        )
+                                      : null,
                                   border: InputBorder.none,
                                   contentPadding:
-                                      EdgeInsets.symmetric(vertical: 10),
+                                      const EdgeInsets.symmetric(vertical: 10),
                                 ),
                               ),
                             ),
@@ -1349,16 +1785,20 @@ class _MainDashboardState extends State<MainDashboard> {
                                               ],
                                             ),
                                           ),
-                                          GestureDetector(
+                                          InkWell(
                                             onTap: () => _toggleFavorite(item),
-                                            child: Icon(
-                                              isFav
-                                                  ? Icons.star_rounded
-                                                  : Icons.star_border_rounded,
-                                              color: isFav
-                                                  ? Colors.amber
-                                                  : Colors.white24,
-                                              size: 20,
+                                            child: Padding(
+                                              padding:
+                                                  const EdgeInsets.all(4.0),
+                                              child: Icon(
+                                                isFav
+                                                    ? Icons.star_rounded
+                                                    : Icons.star_border_rounded,
+                                                color: isFav
+                                                    ? Colors.amber
+                                                    : Colors.white24,
+                                                size: 20,
+                                              ),
                                             ),
                                           ),
                                         ],
@@ -1373,7 +1813,7 @@ class _MainDashboardState extends State<MainDashboard> {
                 ),
               ),
 
-              // 3. PAINEL DIREITO: PRÉ-VISUALIZAÇÃO + TROCA RÁPIDA DE QUALIDADE
+              // COLUNA 3: PRÉ-VISUALIZAÇÃO + QUALIDADES + FAVORITAR NA TV
               Container(
                 width: 330,
                 decoration: const BoxDecoration(
@@ -1408,6 +1848,8 @@ class _MainDashboardState extends State<MainDashboard> {
                     if (activeItem != null) ...[
                       Text(
                         activeItem!.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                             fontSize: 16, fontWeight: FontWeight.bold),
                       ),
@@ -1418,12 +1860,12 @@ class _MainDashboardState extends State<MainDashboard> {
                             fontSize: 12, color: Color(0xFF00E5FF)),
                       ),
                       const SizedBox(height: 14),
-                      // Seletor Rápido de Qualidade no Painel Lateral
                       _buildQuickQualityRow(activeItem!),
-                      const SizedBox(height: 18),
+                      const SizedBox(height: 16),
                       SizedBox(
                         width: double.infinity,
                         child: TVFocusableItem(
+                          autoScroll: false,
                           onSelect: () => _openFullScreen(activeItem!),
                           builder: (context, isFocused) => Container(
                             padding: const EdgeInsets.symmetric(vertical: 13),
@@ -1457,6 +1899,49 @@ class _MainDashboardState extends State<MainDashboard> {
                           ),
                         ),
                       ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: TVFocusableItem(
+                          autoScroll: false,
+                          onSelect: () => _toggleFavorite(activeItem!),
+                          builder: (context, isFocused) {
+                            final isFav = favoriteIds.contains(activeItem!.id);
+                            return Container(
+                              padding: const EdgeInsets.symmetric(vertical: 11),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF151924),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isFocused
+                                      ? const Color(0xFF00E5FF)
+                                      : Colors.white12,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    isFav
+                                        ? Icons.star_rounded
+                                        : Icons.star_border_rounded,
+                                    color:
+                                        isFav ? Colors.amber : Colors.white70,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    isFav
+                                        ? 'Remover Favorito'
+                                        : 'Favoritar Canal',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                     ],
                   ],
                 ),
@@ -1468,14 +1953,14 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
-  // ===========================================================================
-  // LAYOUT MOBILE (CELULAR)
-  // ===========================================================================
   Widget _buildMobileLayout() {
+    // Recolhe o mini-player automaticamente quando o teclado de busca está aberto no celular
+    final isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
+
     return Column(
       children: [
         _buildTopNavigationAndStatsBar(isTV: false),
-        if (activeItem != null && !isMiniPipFloating)
+        if (activeItem != null && !isMiniPipFloating && !isKeyboardOpen)
           AspectRatio(
             aspectRatio: 16 / 9,
             child: Stack(
@@ -1553,18 +2038,27 @@ class _MainDashboardState extends State<MainDashboard> {
                 searchQuery = v;
                 _applyItemsFilter();
               },
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 hintText: 'Buscar canais, filmes ou séries...',
-                hintStyle: TextStyle(fontSize: 13, color: Colors.white38),
-                prefixIcon:
-                    Icon(Icons.search, color: Color(0xFF00E5FF), size: 18),
+                hintStyle: const TextStyle(fontSize: 13, color: Colors.white38),
+                prefixIcon: const Icon(Icons.search,
+                    color: Color(0xFF00E5FF), size: 18),
+                suffixIcon: searchQuery.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear, size: 18),
+                        onPressed: () {
+                          _searchController.clear();
+                          searchQuery = '';
+                          _applyItemsFilter();
+                        },
+                      )
+                    : null,
                 border: InputBorder.none,
-                contentPadding: EdgeInsets.symmetric(vertical: 10),
+                contentPadding: const EdgeInsets.symmetric(vertical: 10),
               ),
             ),
           ),
         ),
-        // Chips de Categorias Mobile com Contadores Exatos
         SizedBox(
           height: 40,
           child: ListView.builder(
@@ -1688,16 +2182,21 @@ class _MainDashboardState extends State<MainDashboard> {
           runSpacing: 6,
           children: variants.map((v) {
             final selected = v.id == current.id;
-            return InkWell(
-              onTap: () => _startPreview(v),
-              child: Container(
+            return TVFocusableItem(
+              autoScroll: false,
+              onSelect: () => _startPreview(v),
+              builder: (context, isFocused) => Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
-                  color:
-                      selected ? const Color(0xFF00E5FF) : const Color(0xFF151924),
+                  color: selected
+                      ? const Color(0xFF00E5FF)
+                      : const Color(0xFF151924),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.white12),
+                  border: Border.all(
+                    color: isFocused ? Colors.white : Colors.white12,
+                    width: isFocused ? 2 : 1,
+                  ),
                 ),
                 child: Text(
                   v.qualityTag,
@@ -1783,13 +2282,30 @@ class _MainDashboardState extends State<MainDashboard> {
   }
 
   Widget _buildLoadingState() {
-    return const Center(
+    return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          CircularProgressIndicator(color: Color(0xFF00E5FF)),
-          SizedBox(height: 18),
-          Text('CARREGANDO E CLASSIFICANDO CONTEÚDOS...'),
+          const CircularProgressIndicator(color: Color(0xFF00E5FF)),
+          const SizedBox(height: 18),
+          const Text('CONECTANDO E CARREGANDO CONTEÚDOS...'),
+          const SizedBox(height: 20),
+          TVFocusableItem(
+            autoScroll: false,
+            onSelect: () => _returnToLoginForEditing(),
+            builder: (context, isFocused) => Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF151924),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: isFocused ? const Color(0xFF00E5FF) : Colors.white24,
+                ),
+              ),
+              child: const Text('Cancelar e Voltar ao Login',
+                  style: TextStyle(fontSize: 12, color: Colors.white70)),
+            ),
+          ),
         ],
       ),
     );
@@ -1799,35 +2315,93 @@ class _MainDashboardState extends State<MainDashboard> {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.cloud_off_rounded,
-                color: Colors.redAccent, size: 52),
-            const SizedBox(height: 12),
-            Text(errorMessage, textAlign: TextAlign.center),
-            const SizedBox(height: 20),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                ElevatedButton(
-                  onPressed: _loadAccountInfoAndPlaylist,
-                  child: const Text('Tentar Novamente'),
-                ),
-                const SizedBox(width: 12),
-                OutlinedButton(
-                  onPressed: () {
-                    Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) => const LoginGatewayScreen()),
-                    );
-                  },
-                  child: const Text('Voltar ao Login'),
-                ),
-              ],
-            ),
-          ],
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.cloud_off_rounded,
+                  color: Colors.redAccent, size: 54),
+              const SizedBox(height: 14),
+              Text(
+                errorMessage,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 14, color: Colors.white70),
+              ),
+              const SizedBox(height: 24),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                alignment: WrapAlignment.center,
+                children: [
+                  TVFocusableItem(
+                    autoScroll: false,
+                    onSelect: () => _returnToLoginForEditing(
+                      errorBanner:
+                          'Verifique ou corrija as informações abaixo e tente novamente.',
+                    ),
+                    builder: (context, isFocused) => Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 13),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFF00E5FF), Color(0xFF2979FF)],
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isFocused ? Colors.white : Colors.transparent,
+                          width: 2,
+                        ),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.edit_rounded,
+                              color: Colors.black, size: 18),
+                          SizedBox(width: 8),
+                          Text(
+                            'CORRIGIR DADOS DE LOGIN',
+                            style: TextStyle(
+                              color: Colors.black,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  TVFocusableItem(
+                    autoScroll: false,
+                    onSelect: _loadAccountInfoAndPlaylist,
+                    builder: (context, isFocused) => Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 18, vertical: 13),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF151924),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isFocused
+                              ? const Color(0xFF00E5FF)
+                              : Colors.white24,
+                          width: isFocused ? 2 : 1,
+                        ),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.refresh_rounded, size: 18),
+                          SizedBox(width: 8),
+                          Text('Tentar Novamente',
+                              style: TextStyle(fontSize: 13)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1835,7 +2409,7 @@ class _MainDashboardState extends State<MainDashboard> {
 }
 
 // =============================================================================
-// TELA 3: SUPER PLAYER COM MOTOR ANTI-TRAVAMENTO AUTOMÁTICO + SELETOR QUALIDADE
+// TELA 3: SUPER PLAYER COM NAVEGAÇÃO DE CONTROLE REMOTO E ANTI-TRAVAMENTO
 // =============================================================================
 class SmartAdaptivePlayerScreen extends StatefulWidget {
   final StreamItem initialItem;
@@ -1866,11 +2440,9 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
   bool showOsd = true;
   bool showQuickChannelDrawer = false;
 
-  // Modos de Proporção de Tela: 0 = Original, 1 = Preencher (Esticar), 2 = 16:9, 3 = 4:3
   int aspectMode = 0;
   final List<String> aspectLabels = ['Original', 'Esticar', '16:9', '4:3'];
 
-  // Motor Anti-Travamento (Monitor de Estabilidade e Buffer Dinâmico)
   Timer? _hideTimer;
   Timer? _antiFreezeWatchdog;
   Duration _lastPosition = Duration.zero;
@@ -1896,7 +2468,6 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
     super.dispose();
   }
 
-  // Motor que escolhe e ajusta a reprodução conforme a velocidade e estabilidade da rede
   Future<void> _initSmartStream(StreamItem item,
       {bool tryHlsFallback = false}) async {
     setState(() {
@@ -1910,18 +2481,20 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
 
     String targetUrl = item.url;
     if (tryHlsFallback && targetUrl.endsWith('.ts')) {
-      targetUrl = targetUrl.substring(0, targetUrl.length - 3) + '.m3u8';
+      targetUrl = '${targetUrl.substring(0, targetUrl.length - 3)}.m3u8';
     }
 
     final old = _controller;
-    _controller = VideoPlayerController.networkUrl(Uri.parse(targetUrl));
+    _controller = VideoPlayerController.networkUrl(
+      Uri.parse(targetUrl),
+      httpHeaders: kIptvHeaders,
+    );
     await old?.dispose();
 
     try {
       await _controller!.initialize();
       if (!mounted) return;
 
-      // Pré-aquecimento adaptativo de buffer baseado na velocidade medida da internet
       if (widget.measuredSpeedMbps < 8.0) {
         await Future.delayed(const Duration(milliseconds: 900));
       } else if (widget.measuredSpeedMbps < 15.0) {
@@ -1945,7 +2518,6 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
     }
   }
 
-  // Monitora travamentos de pacote em tempo real e reconstrói o buffer automaticamente
   void _startAntiFreezeWatchdog() {
     _antiFreezeWatchdog?.cancel();
     _stallCounter = 0;
@@ -1958,11 +2530,9 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
       if (value.isPlaying) {
         if (value.position == _lastPosition && value.isBuffering) {
           _stallCounter++;
-          // Se detectar que a rede oscilou por mais de 6s, aplica estabilização automática
           if (_stallCounter >= 3 && !_isRecoveringStream) {
             setState(() => _isRecoveringStream = true);
             await _controller!.pause();
-            // Aguarda janela de recomposição de buffer proporcional à estabilidade
             await Future.delayed(const Duration(milliseconds: 1200));
             if (mounted && _controller != null) {
               await _controller!.play();
@@ -1980,7 +2550,7 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
 
   void _resetOsdTimer() {
     _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 4), () {
+    _hideTimer = Timer(const Duration(seconds: 5), () {
       if (mounted && !showQuickChannelDrawer) {
         setState(() => showOsd = false);
       }
@@ -2011,366 +2581,454 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
     final qualities = _getQualities();
     final isVod = currentItem.type != ContentType.live;
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Focus(
-        autofocus: true,
-        onKeyEvent: (node, event) {
-          if (event is KeyDownEvent) {
-            setState(() => showOsd = true);
-            _resetOsdTimer();
-            if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
-                event.logicalKey == LogicalKeyboardKey.channelUp) {
-              _stepChannel(-1);
-              return KeyEventResult.handled;
-            } else if (event.logicalKey == LogicalKeyboardKey.arrowDown ||
-                event.logicalKey == LogicalKeyboardKey.channelDown) {
-              _stepChannel(1);
-              return KeyEventResult.handled;
-            } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft &&
-                !isVod) {
-              setState(
-                  () => showQuickChannelDrawer = !showQuickChannelDrawer);
-              return KeyEventResult.handled;
-            }
-          }
-          return KeyEventResult.ignored;
-        },
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () {
-            setState(() {
-              if (showQuickChannelDrawer) {
-                showQuickChannelDrawer = false;
+    return PopScope(
+      canPop: !showQuickChannelDrawer,
+      onPopInvoked: (didPop) {
+        if (!didPop && showQuickChannelDrawer) {
+          setState(() => showQuickChannelDrawer = false);
+        }
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Focus(
+          autofocus: true,
+          onKeyEvent: (node, event) {
+            if (event is KeyDownEvent) {
+              // Se a gaveta de canais e os controles estão fechados, as setas fazem Zapping rápido
+              if (!showQuickChannelDrawer && !showOsd) {
+                if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+                    event.logicalKey == LogicalKeyboardKey.channelUp) {
+                  _stepChannel(-1);
+                  return KeyEventResult.handled;
+                } else if (event.logicalKey == LogicalKeyboardKey.arrowDown ||
+                    event.logicalKey == LogicalKeyboardKey.channelDown) {
+                  _stepChannel(1);
+                  return KeyEventResult.handled;
+                } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft &&
+                    !isVod) {
+                  setState(() => showQuickChannelDrawer = true);
+                  return KeyEventResult.handled;
+                } else if (event.logicalKey == LogicalKeyboardKey.select ||
+                    event.logicalKey == LogicalKeyboardKey.enter) {
+                  setState(() => showOsd = true);
+                  _resetOsdTimer();
+                  return KeyEventResult.handled;
+                }
               } else {
-                showOsd = !showOsd;
+                // Se o menu OSD está aberto, reinicia o timer para não sumir enquanto usa o controle
+                _resetOsdTimer();
               }
-            });
-            if (showOsd) _resetOsdTimer();
+            }
+            return KeyEventResult.ignored;
           },
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              // 1. RENDERIZADOR DE VÍDEO COM PROPORÇÃO AJUSTÁVEL
-              Center(
-                child: hasError
-                    ? Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.wifi_tethering_error_rounded,
-                              color: Colors.redAccent, size: 48),
-                          const SizedBox(height: 12),
-                          const Text('Sinal oscilou além do limite.'),
-                          const SizedBox(height: 12),
-                          ElevatedButton(
-                            onPressed: () {
-                              _autoRecoveryAttempts = 0;
-                              _initSmartStream(currentItem,
-                                  tryHlsFallback: !_usingHlsFallback);
-                            },
-                            child: const Text('Reconectar Fluxo'),
-                          ),
-                        ],
-                      )
-                    : isInitialized && _controller != null
-                        ? _buildAspectVideo()
-                        : const CircularProgressIndicator(
-                            color: Color(0xFF00E5FF)),
-              ),
-
-              // Indicador discreto quando o sistema Anti-Travamento está estabilizando
-              if (_isRecoveringStream)
-                Positioned(
-                  top: 24,
-                  right: 24,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.black87,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: const Color(0xFF00E5FF)),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Color(0xFF00E5FF)),
-                        ),
-                        SizedBox(width: 8),
-                        Text('Otimizando buffer...',
-                            style: TextStyle(fontSize: 11)),
-                      ],
-                    ),
-                  ),
-                ),
-
-              // 2. CONTROLES OSD EM TELA CHEIA
-              if (showOsd)
-                Container(
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.black87,
-                        Colors.transparent,
-                        Colors.transparent,
-                        Colors.black87,
-                      ],
-                    ),
-                  ),
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      // TOPO DO PLAYER
-                      Row(
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.arrow_back_ios_new_rounded),
-                            onPressed: () => Navigator.pop(context),
-                          ),
-                          IconButton(
-                            tooltip: 'Lista Rápida de Canais',
-                            icon: const Icon(Icons.menu_open_rounded,
-                                color: Color(0xFF00E5FF)),
-                            onPressed: () => setState(() =>
-                                showQuickChannelDrawer =
-                                    !showQuickChannelDrawer),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  currentItem.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontSize: 18,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              setState(() {
+                if (showQuickChannelDrawer) {
+                  showQuickChannelDrawer = false;
+                } else {
+                  showOsd = !showOsd;
+                }
+              });
+              if (showOsd) _resetOsdTimer();
+            },
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Center(
+                  child: hasError
+                      ? Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.wifi_tethering_error_rounded,
+                                color: Colors.redAccent, size: 48),
+                            const SizedBox(height: 12),
+                            const Text('Sinal oscilou além do limite.'),
+                            const SizedBox(height: 12),
+                            TVFocusableItem(
+                              autoScroll: false,
+                              onSelect: () {
+                                _autoRecoveryAttempts = 0;
+                                _initSmartStream(currentItem,
+                                    tryHlsFallback: !_usingHlsFallback);
+                              },
+                              builder: (context, isFocused) => Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 18, vertical: 10),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF00E5FF),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: isFocused
+                                        ? Colors.white
+                                        : Colors.transparent,
+                                    width: 2,
+                                  ),
+                                ),
+                                child: const Text(
+                                  'Reconectar Fluxo',
+                                  style: TextStyle(
+                                      color: Colors.black,
                                       fontWeight: FontWeight.bold),
                                 ),
-                                Text(
-                                  currentItem.group,
-                                  style: const TextStyle(
-                                      fontSize: 12, color: Colors.white60),
-                                ),
-                              ],
+                              ),
                             ),
+                          ],
+                        )
+                      : isInitialized && _controller != null
+                          ? _buildAspectVideo()
+                          : const CircularProgressIndicator(
+                              color: Color(0xFF00E5FF)),
+                ),
+                if (_isRecoveringStream)
+                  Positioned(
+                    top: 24,
+                    right: 24,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.black87,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: const Color(0xFF00E5FF)),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Color(0xFF00E5FF)),
                           ),
-                          // SELETOR RÁPIDO DE QUALIDADE (SD / HD / FHD / 4K) DENTRO DO PLAYER
-                          if (qualities.length > 1)
-                            Row(
-                              children: qualities.map((q) {
-                                final isCurrent = q.id == currentItem.id;
-                                return Padding(
-                                  padding: const EdgeInsets.only(left: 6),
-                                  child: InkWell(
-                                    onTap: () => _initSmartStream(q),
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 10, vertical: 6),
-                                      decoration: BoxDecoration(
-                                        color: isCurrent
-                                            ? const Color(0xFF00E5FF)
-                                            : Colors.white12,
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Text(
-                                        q.qualityTag,
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.bold,
+                          SizedBox(width: 8),
+                          Text('Otimizando buffer...',
+                              style: TextStyle(fontSize: 11)),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (showOsd)
+                  Container(
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.black87,
+                          Colors.transparent,
+                          Colors.transparent,
+                          Colors.black87,
+                        ],
+                      ),
+                    ),
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            TVIconButton(
+                              icon: Icons.arrow_back_ios_new_rounded,
+                              tooltip: 'Voltar',
+                              onPressed: () => Navigator.pop(context),
+                            ),
+                            const SizedBox(width: 6),
+                            TVIconButton(
+                              tooltip: 'Lista Rápida de Canais',
+                              icon: Icons.menu_open_rounded,
+                              color: const Color(0xFF00E5FF),
+                              onPressed: () => setState(() =>
+                                  showQuickChannelDrawer =
+                                      !showQuickChannelDrawer),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    currentItem.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold),
+                                  ),
+                                  Text(
+                                    currentItem.group,
+                                    style: const TextStyle(
+                                        fontSize: 12, color: Colors.white60),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            if (qualities.length > 1)
+                              Row(
+                                children: qualities.map((q) {
+                                  final isCurrent = q.id == currentItem.id;
+                                  return Padding(
+                                    padding: const EdgeInsets.only(left: 6),
+                                    child: TVFocusableItem(
+                                      autoScroll: false,
+                                      onSelect: () => _initSmartStream(q),
+                                      builder: (context, isFocused) =>
+                                          Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 10, vertical: 6),
+                                        decoration: BoxDecoration(
                                           color: isCurrent
-                                              ? Colors.black
-                                              : Colors.white,
+                                              ? const Color(0xFF00E5FF)
+                                              : Colors.white12,
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          border: Border.all(
+                                            color: isFocused
+                                                ? Colors.white
+                                                : Colors.transparent,
+                                            width: 2,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          q.qualityTag,
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                            color: isCurrent
+                                                ? Colors.black
+                                                : Colors.white,
+                                          ),
                                         ),
                                       ),
                                     ),
+                                  );
+                                }).toList(),
+                              ),
+                            const SizedBox(width: 8),
+                            TVFocusableItem(
+                              autoScroll: false,
+                              onSelect: () {
+                                setState(() => aspectMode =
+                                    (aspectMode + 1) % aspectLabels.length);
+                              },
+                              builder: (context, isFocused) => Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: Colors.white12,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: isFocused
+                                        ? const Color(0xFF00E5FF)
+                                        : Colors.white24,
                                   ),
-                                );
-                              }).toList(),
-                            ),
-                          const SizedBox(width: 8),
-                          // Botão Proporção de Tela
-                          OutlinedButton.icon(
-                            onPressed: () {
-                              setState(() => aspectMode =
-                                  (aspectMode + 1) % aspectLabels.length);
-                            },
-                            icon: const Icon(Icons.aspect_ratio_rounded,
-                                size: 16),
-                            label: Text(aspectLabels[aspectMode],
-                                style: const TextStyle(fontSize: 11)),
-                          ),
-                          const SizedBox(width: 8),
-                          // Botão Picture-in-Picture (PiP)
-                          IconButton(
-                            tooltip: 'Minimizar em PiP',
-                            icon: const Icon(
-                                Icons.picture_in_picture_alt_rounded,
-                                color: Color(0xFF00E5FF)),
-                            onPressed: () {
-                              Navigator.pop(context);
-                              widget.onMinimizeToPip(currentItem);
-                            },
-                          ),
-                        ],
-                      ),
-
-                      // RODAPÉ DO PLAYER (COM BARRA DE PROGRESSO SE FOR FILME/SÉRIE)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 18, vertical: 12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF12151F).withOpacity(0.92),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.white12),
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (isVod && isInitialized && _controller != null)
-                              VideoProgressIndicator(
-                                _controller!,
-                                allowScrubbing: true,
-                                colors: const VideoProgressColors(
-                                  playedColor: Color(0xFF00E5FF),
-                                  bufferedColor: Colors.white24,
-                                  backgroundColor: Colors.white10,
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.aspect_ratio_rounded,
+                                        size: 16),
+                                    const SizedBox(width: 6),
+                                    Text(aspectLabels[aspectMode],
+                                        style: const TextStyle(fontSize: 11)),
+                                  ],
                                 ),
                               ),
-                            Row(
-                              children: [
-                                IconButton(
-                                  icon: const Icon(Icons.skip_previous_rounded,
-                                      size: 28),
-                                  onPressed: () => _stepChannel(-1),
+                            ),
+                            const SizedBox(width: 8),
+                            TVIconButton(
+                              tooltip: 'Minimizar em PiP',
+                              icon: Icons.picture_in_picture_alt_rounded,
+                              color: const Color(0xFF00E5FF),
+                              onPressed: () {
+                                Navigator.pop(context);
+                                widget.onMinimizeToPip(currentItem);
+                              },
+                            ),
+                          ],
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 18, vertical: 12),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF12151F).withOpacity(0.92),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.white12),
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (isVod && isInitialized && _controller != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 8.0),
+                                  child: VideoProgressIndicator(
+                                    _controller!,
+                                    allowScrubbing: true,
+                                    colors: const VideoProgressColors(
+                                      playedColor: Color(0xFF00E5FF),
+                                      bufferedColor: Colors.white24,
+                                      backgroundColor: Colors.white10,
+                                    ),
+                                  ),
                                 ),
-                                IconButton(
-                                  icon: Icon(
-                                    _controller != null &&
+                              Row(
+                                children: [
+                                  TVIconButton(
+                                    icon: Icons.skip_previous_rounded,
+                                    tooltip: 'Canal Anterior',
+                                    onPressed: () => _stepChannel(-1),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  TVIconButton(
+                                    icon: _controller != null &&
                                             _controller!.value.isPlaying
                                         ? Icons.pause_circle_filled_rounded
                                         : Icons.play_circle_fill_rounded,
                                     color: const Color(0xFF00E5FF),
-                                    size: 38,
+                                    size: 34,
+                                    tooltip: 'Pausar / Reproduzir',
+                                    onPressed: () {
+                                      if (_controller == null) return;
+                                      setState(() {
+                                        _controller!.value.isPlaying
+                                            ? _controller!.pause()
+                                            : _controller!.play();
+                                      });
+                                    },
                                   ),
-                                  onPressed: () {
-                                    if (_controller == null) return;
-                                    setState(() {
-                                      _controller!.value.isPlaying
-                                          ? _controller!.pause()
-                                          : _controller!.play();
-                                    });
-                                  },
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.skip_next_rounded,
-                                      size: 28),
-                                  onPressed: () => _stepChannel(1),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Text(
-                                    '${currentItem.name} • ${currentItem.qualityTag}',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        fontWeight: FontWeight.bold),
+                                  const SizedBox(width: 6),
+                                  TVIconButton(
+                                    icon: Icons.skip_next_rounded,
+                                    tooltip: 'Próximo Canal',
+                                    onPressed: () => _stepChannel(1),
                                   ),
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 8, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.green.withOpacity(0.2),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: const Text(
-                                    'ANTI-TRAVAMENTO ATIVO',
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      color: Colors.greenAccent,
-                                      fontWeight: FontWeight.bold,
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      '${currentItem.name} • ${currentItem.qualityTag}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.bold),
                                     ),
                                   ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-              // 3. MENU LATERAL TRANSPARENTE DE CANAIS DENTRO DA TELA CHEIA
-              if (showQuickChannelDrawer)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Container(
-                    width: 290,
-                    color: const Color(0xFF08090E).withOpacity(0.92),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.all(16.0),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'TROCA RÁPIDA',
-                                style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFF00E5FF)),
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.close),
-                                onPressed: () => setState(
-                                    () => showQuickChannelDrawer = false),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.green.withOpacity(0.2),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: const Text(
+                                      'ANTI-TRAVAMENTO ATIVO',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.greenAccent,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
-                          ),
-                        ),
-                        Expanded(
-                          child: ListView.builder(
-                            itemCount: widget.playlist.length,
-                            itemBuilder: (context, idx) {
-                              final ch = widget.playlist[idx];
-                              final selected = ch.id == currentItem.id;
-                              return ListTile(
-                                selected: selected,
-                                selectedTileColor:
-                                    const Color(0xFF00E5FF).withOpacity(0.2),
-                                title: Text(ch.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(fontSize: 13)),
-                                subtitle: Text(ch.qualityTag,
-                                    style: const TextStyle(
-                                        fontSize: 10,
-                                        color: Color(0xFF00E5FF))),
-                                onTap: () {
-                                  _initSmartStream(ch);
-                                  setState(
-                                      () => showQuickChannelDrawer = false);
-                                },
-                              );
-                            },
                           ),
                         ),
                       ],
                     ),
                   ),
-                ),
-            ],
+                if (showQuickChannelDrawer)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Container(
+                      width: 290,
+                      color: const Color(0xFF08090E).withOpacity(0.95),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.all(16.0),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'TROCA RÁPIDA',
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF00E5FF)),
+                                ),
+                                TVIconButton(
+                                  icon: Icons.close,
+                                  onPressed: () => setState(
+                                      () => showQuickChannelDrawer = false),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Expanded(
+                            child: ListView.builder(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 8),
+                              itemCount: widget.playlist.length,
+                              itemBuilder: (context, idx) {
+                                final ch = widget.playlist[idx];
+                                final selected = ch.id == currentItem.id;
+                                return TVFocusableItem(
+                                  onSelect: () {
+                                    _initSmartStream(ch);
+                                    setState(
+                                        () => showQuickChannelDrawer = false);
+                                  },
+                                  builder: (context, isFocused) => Container(
+                                    margin:
+                                        const EdgeInsets.symmetric(vertical: 2),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 12, vertical: 10),
+                                    decoration: BoxDecoration(
+                                      color: selected
+                                          ? const Color(0xFF00E5FF)
+                                              .withOpacity(0.2)
+                                          : isFocused
+                                              ? Colors.white10
+                                              : Colors.transparent,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: isFocused
+                                            ? const Color(0xFF00E5FF)
+                                            : Colors.transparent,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            ch.name,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style:
+                                                const TextStyle(fontSize: 13),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          ch.qualityTag,
+                                          style: const TextStyle(
+                                              fontSize: 10,
+                                              color: Color(0xFF00E5FF),
+                                              fontWeight: FontWeight.bold),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -2413,7 +3071,7 @@ class _SpeedTestDialogState extends State<SpeedTestDialog> {
   bool isTesting = false;
   double speedMbps = 0.0;
   int pingMs = 0;
-  String statusText = 'Toque em Iniciar para medir sua conexão atual';
+  String statusText = 'Selecione Iniciar para medir sua conexão atual';
 
   Future<void> _runTest() async {
     setState(() {
@@ -2423,7 +3081,8 @@ class _SpeedTestDialogState extends State<SpeedTestDialog> {
     });
 
     try {
-      final uri = Uri.parse('https://speed.cloudflare.com/__down?bytes=5000000');
+      final uri =
+          Uri.parse('https://speed.cloudflare.com/__down?bytes=5000000');
       final pingWatch = Stopwatch()..start();
       final client = HttpClient();
       final req = await client.getUrl(uri).timeout(const Duration(seconds: 12));
@@ -2506,35 +3165,58 @@ class _SpeedTestDialogState extends State<SpeedTestDialog> {
         ],
       ),
       actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Fechar'),
-        ),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF00E5FF),
-            foregroundColor: Colors.black,
+        TVFocusableItem(
+          autoScroll: false,
+          onSelect: () => Navigator.pop(context),
+          builder: (context, isFocused) => Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                  color: isFocused ? Colors.white : Colors.transparent),
+            ),
+            child: const Text('Fechar'),
           ),
-          onPressed: isTesting ? null : _runTest,
-          child: const Text('Iniciar Teste',
-              style: TextStyle(fontWeight: FontWeight.bold)),
         ),
+        if (!isTesting)
+          TVFocusableItem(
+            autoScroll: false,
+            onSelect: _runTest,
+            builder: (context, isFocused) => Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF00E5FF),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: isFocused ? Colors.white : Colors.transparent,
+                  width: 2,
+                ),
+              ),
+              child: const Text(
+                'Iniciar Teste',
+                style:
+                    TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
       ],
     );
   }
 }
 
 // =============================================================================
-// COMPONENTE DE FOCO PARA CONTROLE REMOTO (D-PAD) E TOQUE
+// WIDGETS NAVEGÁVEIS POR CONTROLE REMOTO (COM AUTO-SCROLL E FOCO VISÍVEL)
 // =============================================================================
 class TVFocusableItem extends StatefulWidget {
   final VoidCallback onSelect;
   final Widget Function(BuildContext context, bool isFocused) builder;
+  final bool autoScroll;
 
   const TVFocusableItem({
     super.key,
     required this.onSelect,
     required this.builder,
+    this.autoScroll = true,
   });
 
   @override
@@ -2547,7 +3229,17 @@ class _TVFocusableItemState extends State<TVFocusableItem> {
   @override
   Widget build(BuildContext context) {
     return FocusableActionDetector(
-      onShowFocusHighlight: (focused) => setState(() => _isFocused = focused),
+      onShowFocusHighlight: (focused) {
+        setState(() => _isFocused = focused);
+        if (focused && widget.autoScroll && mounted) {
+          Scrollable.ensureVisible(
+            context,
+            alignment: 0.35,
+            duration: const Duration(milliseconds: 120),
+            curve: Curves.easeOut,
+          );
+        }
+      },
       actions: <Type, Action<Intent>>{
         ActivateIntent: CallbackAction<ActivateIntent>(
           onInvoke: (_) {
@@ -2557,6 +3249,7 @@ class _TVFocusableItemState extends State<TVFocusableItem> {
         ),
       },
       child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
         onTap: widget.onSelect,
         child: widget.builder(context, _isFocused),
       ),
@@ -2564,8 +3257,54 @@ class _TVFocusableItemState extends State<TVFocusableItem> {
   }
 }
 
+class TVIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onPressed;
+  final String? tooltip;
+  final Color color;
+  final double size;
+
+  const TVIconButton({
+    super.key,
+    required this.icon,
+    required this.onPressed,
+    this.tooltip,
+    this.color = Colors.white70,
+    this.size = 21,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TVFocusableItem(
+      autoScroll: false,
+      onSelect: onPressed,
+      builder: (context, isFocused) => Tooltip(
+        message: tooltip ?? '',
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: isFocused
+                ? const Color(0xFF00E5FF).withOpacity(0.2)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isFocused ? const Color(0xFF00E5FF) : Colors.transparent,
+              width: 1.5,
+            ),
+          ),
+          child: Icon(
+            icon,
+            color: isFocused ? Colors.white : color,
+            size: size,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // =============================================================================
-// PARSER AVANÇADO: SEPARA CANAIS, FILMES, SÉRIES E EXTRAI QUALIDADE (SD/HD/FHD/4K)
+// PARSER AVANÇADO DE LISTAS M3U PLUS
 // =============================================================================
 List<StreamItem> parseM3UAdvanced(String raw) {
   final List<StreamItem> result = [];
@@ -2578,8 +3317,9 @@ List<StreamItem> parseM3UAdvanced(String raw) {
 
   final groupRegex = RegExp(r'group-title="([^"]*)"', caseSensitive: false);
   final logoRegex = RegExp(r'tvg-logo="([^"]*)"', caseSensitive: false);
-  final qualityRegex =
-      RegExp(r'\b(4K|UHD|FHD|1080P|HD|720P|SD|H265|HEVC)\b', caseSensitive: false);
+  final qualityRegex = RegExp(
+      r'\b(4K|UHD|FHD|1080P|HD|720P|SD|H265|HEVC)\b',
+      caseSensitive: false);
   final seriesRegex = RegExp(r'\bS\d+\s*E\d+\b', caseSensitive: false);
 
   for (final line in lines) {
@@ -2604,7 +3344,6 @@ List<StreamItem> parseM3UAdvanced(String raw) {
       final lowerGroup = group.toLowerCase();
       final lowerName = name.toLowerCase();
 
-      // Classifica entre TV ao Vivo, Filme ou Série
       ContentType type = ContentType.live;
       if (lowerUrl.contains('/series/') ||
           lowerGroup.contains('série') ||
@@ -2620,7 +3359,6 @@ List<StreamItem> parseM3UAdvanced(String raw) {
         type = ContentType.movie;
       }
 
-      // Extrai a tag de qualidade (4K, FHD, HD, SD) e limpa o nome para agrupar variantes
       String quality = 'HD';
       final qMatch = qualityRegex.firstMatch(name);
       if (qMatch != null) {
