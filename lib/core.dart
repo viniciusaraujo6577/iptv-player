@@ -18,6 +18,9 @@ class StreamItem {
   final String id;
   final String name;
   final String cleanName;
+  final String seriesName;
+  final int seasonNumber;
+  final int episodeNumber;
   final String qualityTag;
   final String group;
   final String logo;
@@ -29,6 +32,9 @@ class StreamItem {
     required this.id,
     required this.name,
     required this.cleanName,
+    required this.seriesName,
+    required this.seasonNumber,
+    required this.episodeNumber,
     required this.qualityTag,
     required this.group,
     required this.logo,
@@ -38,6 +44,114 @@ class StreamItem {
   });
 }
 
+// =============================================================================
+// MODELO AGRUPADOR DE SÉRIES (CAPA ÚNICA -> TEMPORADAS -> EPISÓDIOS)
+// =============================================================================
+class SeriesGroup {
+  final String id;
+  final String title;
+  final String group;
+  final String logo;
+  final String qualityTag;
+  final bool isAdult;
+  final Map<int, List<StreamItem>> seasons;
+
+  SeriesGroup({
+    required this.id,
+    required this.title,
+    required this.group,
+    required this.logo,
+    required this.qualityTag,
+    required this.isAdult,
+    required this.seasons,
+  });
+
+  int get totalSeasons => seasons.length;
+
+  int get totalEpisodes =>
+      seasons.values.fold(0, (sum, list) => sum + list.length);
+
+  List<StreamItem> get allEpisodesFlat {
+    final sortedKeys = seasons.keys.toList()..sort();
+    final List<StreamItem> list = [];
+    for (final k in sortedKeys) {
+      list.addAll(seasons[k]!);
+    }
+    return list;
+  }
+}
+
+List<SeriesGroup> groupSeriesItems(List<StreamItem> items) {
+  final Map<String, Map<int, List<StreamItem>>> map = {};
+  final Map<String, StreamItem> firstItemMap = {};
+
+  for (final item in items) {
+    final key = item.seriesName.trim().toLowerCase();
+    if (!firstItemMap.containsKey(key)) {
+      firstItemMap[key] = item;
+    } else if (firstItemMap[key]!.logo.isEmpty && item.logo.isNotEmpty) {
+      firstItemMap[key] = item;
+    }
+    map.putIfAbsent(key, () => {});
+    map[key]!.putIfAbsent(item.seasonNumber, () => []);
+    map[key]![item.seasonNumber]!.add(item);
+  }
+
+  final List<SeriesGroup> result = [];
+  map.forEach((key, seasonsMap) {
+    final ref = firstItemMap[key]!;
+    final sortedSeasons = <int, List<StreamItem>>{};
+    final seasonKeys = seasonsMap.keys.toList()..sort();
+    for (final sKey in seasonKeys) {
+      final epList = List<StreamItem>.from(seasonsMap[sKey]!);
+      epList.sort((a, b) => a.episodeNumber.compareTo(b.episodeNumber));
+      sortedSeasons[sKey] = epList;
+    }
+
+    result.add(
+      SeriesGroup(
+        id: 'series_${key.hashCode}',
+        title: ref.seriesName,
+        group: ref.group,
+        logo: ref.logo,
+        qualityTag: ref.qualityTag,
+        isAdult: ref.isAdult,
+        seasons: sortedSeasons,
+      ),
+    );
+  });
+
+  result.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+  return result;
+}
+
+// =============================================================================
+// TRANSIÇÃO ANIMADA FLUIDA ENTRE TELAS
+// =============================================================================
+Route<T> createSmoothRoute<T>(Widget page) {
+  return PageRouteBuilder<T>(
+    transitionDuration: const Duration(milliseconds: 280),
+    reverseTransitionDuration: const Duration(milliseconds: 220),
+    pageBuilder: (context, animation, secondaryAnimation) => page,
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+      );
+      return FadeTransition(
+        opacity: curved,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.97, end: 1.0).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
+}
+
+// =============================================================================
+// ARMAZENAMENTO DE PREFERÊNCIA DE DISPOSITIVO E SESSÃO
+// =============================================================================
 class AppStorage {
   static File get _deviceFile =>
       File('${Directory.systemTemp.path}/unex_device_mode_v6.json');
@@ -143,7 +257,8 @@ Future<void> showExitAppConfirmationDialog(BuildContext context) async {
             ),
             child: const Text(
               'Continuar no App',
-              style: TextStyle(color: Colors.black, fontWeight: FontWeight.w900),
+              style:
+                  TextStyle(color: Colors.black, fontWeight: FontWeight.w900),
             ),
           ),
         ),
@@ -174,6 +289,362 @@ Future<void> showExitAppConfirmationDialog(BuildContext context) async {
   );
 }
 
+// =============================================================================
+// MODAL STREAMING DE TEMPORADAS E EPISÓDIOS DA SÉRIE (CELULAR E TV)
+// =============================================================================
+Future<void> openSeriesDetailsModal({
+  required BuildContext context,
+  required SeriesGroup series,
+  required void Function(StreamItem episode, List<StreamItem> fullSeriesPlaylist)
+      onPlayEpisode,
+}) async {
+  final seasonKeys = series.seasons.keys.toList()..sort();
+  int selectedSeason = seasonKeys.isNotEmpty ? seasonKeys.first : 1;
+  final allEpisodesPlaylist = series.allEpisodesFlat;
+
+  await showDialog(
+    context: context,
+    barrierColor: Colors.black87,
+    builder: (ctx) {
+      return StatefulBuilder(
+        builder: (context, setModalState) {
+          final currentEpisodes = series.seasons[selectedSeason] ?? [];
+
+          return Dialog(
+            backgroundColor: const Color(0xFF0B0E17),
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22),
+              side: BorderSide(
+                  color: const Color(0xFF00E5FF).withOpacity(0.45), width: 1.5),
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 860, maxHeight: 620),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // CABEÇALHO ESTILO STREAMING COM CAPA E RESUMO DA SÉRIE
+                  Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      borderRadius:
+                          const BorderRadius.vertical(top: Radius.circular(21)),
+                      gradient: LinearGradient(
+                        colors: [
+                          const Color(0xFF162642),
+                          const Color(0xFF0B0E17).withOpacity(0.95),
+                        ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(14),
+                          child: Container(
+                            width: 95,
+                            height: 135,
+                            color: const Color(0xFF08090E),
+                            child: series.logo.isNotEmpty
+                                ? Image.network(
+                                    series.logo,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, __, ___) => const Icon(
+                                        Icons.video_library_rounded,
+                                        color: Color(0xFF00E5FF),
+                                        size: 40),
+                                  )
+                                : const Icon(Icons.video_library_rounded,
+                                    color: Color(0xFF00E5FF), size: 40),
+                          ),
+                        ),
+                        const SizedBox(width: 18),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  buildQualityBadge(series.qualityTag),
+                                  const SizedBox(width: 8),
+                                  Flexible(
+                                    child: Text(
+                                      series.group,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Color(0xFF00E5FF),
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                series.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                '${series.totalSeasons} Temporada(s) • ${series.totalEpisodes} Episódio(s) disponíveis',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              if (currentEpisodes.isNotEmpty)
+                                TVFocusableItem(
+                                  autofocus: true,
+                                  autoScroll: false,
+                                  onSelect: () {
+                                    Navigator.pop(ctx);
+                                    onPlayEpisode(currentEpisodes.first,
+                                        allEpisodesPlaylist);
+                                  },
+                                  builder: (context, isFocused) =>
+                                      AnimatedScale(
+                                    scale: isFocused ? 1.05 : 1.0,
+                                    duration: const Duration(milliseconds: 140),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 18, vertical: 10),
+                                      decoration: BoxDecoration(
+                                        gradient: const LinearGradient(
+                                          colors: [
+                                            Color(0xFF00E5FF),
+                                            Color(0xFF2979FF)
+                                          ],
+                                        ),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(
+                                          color: isFocused
+                                              ? Colors.white
+                                              : Colors.transparent,
+                                          width: 2,
+                                        ),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Icon(Icons.play_arrow_rounded,
+                                              color: Colors.black, size: 20),
+                                          const SizedBox(width: 6),
+                                          Text(
+                                            'Assistir T$selectedSeason:E${currentEpisodes.first.episodeNumber}',
+                                            style: const TextStyle(
+                                              color: Colors.black,
+                                              fontWeight: FontWeight.w900,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        TVIconButton(
+                          icon: Icons.close_rounded,
+                          onPressed: () => Navigator.pop(ctx),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // SELETOR HORIZONTAL DE TEMPORADAS
+                  Container(
+                    height: 52,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF101420),
+                      border: Border(
+                        top: BorderSide(color: Colors.white10),
+                        bottom: BorderSide(color: Colors.white10),
+                      ),
+                    ),
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: seasonKeys.length,
+                      itemBuilder: (context, index) {
+                        final sNum = seasonKeys[index];
+                        final epCount = series.seasons[sNum]?.length ?? 0;
+                        final isSelected = sNum == selectedSeason;
+
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: TVFocusableItem(
+                            autoScroll: false,
+                            onSelect: () =>
+                                setModalState(() => selectedSeason = sNum),
+                            builder: (context, isFocused) => AnimatedContainer(
+                              duration: const Duration(milliseconds: 160),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 6),
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                gradient: isSelected
+                                    ? const LinearGradient(colors: [
+                                        Color(0xFF00E5FF),
+                                        Color(0xFF2979FF)
+                                      ])
+                                    : null,
+                                color: isSelected
+                                    ? null
+                                    : const Color(0xFF171C2B),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: isFocused
+                                      ? Colors.white
+                                      : isSelected
+                                          ? Colors.transparent
+                                          : Colors.white12,
+                                  width: isFocused ? 2 : 1,
+                                ),
+                              ),
+                              child: Text(
+                                'Temporada $sNum ($epCount)',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color:
+                                      isSelected ? Colors.black : Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+
+                  // LISTA ANIMADA DE EPISÓDIOS DA TEMPORADA
+                  Expanded(
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      child: ListView.builder(
+                        key: ValueKey<int>(selectedSeason),
+                        padding: const EdgeInsets.all(16),
+                        itemCount: currentEpisodes.length,
+                        itemBuilder: (context, index) {
+                          final ep = currentEpisodes[index];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: TVFocusableItem(
+                              onSelect: () {
+                                Navigator.pop(ctx);
+                                onPlayEpisode(ep, allEpisodesPlaylist);
+                              },
+                              builder: (context, isFocused) =>
+                                  AnimatedContainer(
+                                duration: const Duration(milliseconds: 140),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 14, vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: isFocused
+                                      ? const Color(0xFF1A2842)
+                                      : const Color(0xFF131724),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: isFocused
+                                        ? const Color(0xFF00E5FF)
+                                        : Colors.white10,
+                                    width: isFocused ? 2 : 1,
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      width: 42,
+                                      height: 42,
+                                      alignment: Alignment.center,
+                                      decoration: BoxDecoration(
+                                        color: isFocused
+                                            ? const Color(0xFF00E5FF)
+                                            : Colors.white10,
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Text(
+                                        'E${ep.episodeNumber.toString().padLeft(2, '0')}',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w900,
+                                          fontSize: 13,
+                                          color: isFocused
+                                              ? Colors.black
+                                              : const Color(0xFF00E5FF),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 14),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            ep.name,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 3),
+                                          Text(
+                                            'Temporada $selectedSeason • Episódio ${ep.episodeNumber}',
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              color: Colors.white54,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    buildQualityBadge(ep.qualityTag),
+                                    const SizedBox(width: 10),
+                                    Icon(
+                                      Icons.play_circle_fill_rounded,
+                                      color: isFocused
+                                          ? const Color(0xFF00E5FF)
+                                          : Colors.white54,
+                                      size: 28,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
+}
+
+// =============================================================================
+// TECLADO VIRTUAL PRÓPRIO PARA TV ANDROID
+// =============================================================================
 Future<void> openTVVirtualKeyboard({
   required BuildContext context,
   required TextEditingController controller,
@@ -239,7 +710,8 @@ Future<void> openTVVirtualKeyboard({
 
           return Dialog(
             backgroundColor: const Color(0xFF10131C),
-            insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(20),
               side: const BorderSide(color: Color(0xFF00E5FF), width: 1.5),
@@ -550,7 +1022,8 @@ class _AdaptiveInputFieldState extends State<AdaptiveInputField> {
           onChanged: widget.onChanged,
         );
       },
-      builder: (context, isFocused) => Container(
+      builder: (context, isFocused) => AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
           color: const Color(0xFF08090E),
@@ -764,11 +1237,16 @@ class _SpeedTestDialogState extends State<SpeedTestDialog> {
   }
 }
 
+// =============================================================================
+// WIDGET DE FOCO COM SUPORTE A GATILHO DE BORDA ESQUERDA (REABRIR MENU LATERAL)
+// =============================================================================
 class TVFocusableItem extends StatefulWidget {
   final VoidCallback onSelect;
   final Widget Function(BuildContext context, bool isFocused) builder;
   final bool autoScroll;
   final bool autofocus;
+  final FocusNode? focusNode;
+  final VoidCallback? onMoveLeft;
 
   const TVFocusableItem({
     super.key,
@@ -776,6 +1254,8 @@ class TVFocusableItem extends StatefulWidget {
     required this.builder,
     this.autoScroll = true,
     this.autofocus = false,
+    this.focusNode,
+    this.onMoveLeft,
   });
 
   @override
@@ -787,26 +1267,36 @@ class _TVFocusableItemState extends State<TVFocusableItem> {
 
   @override
   Widget build(BuildContext context) {
-    return FocusableActionDetector(
+    return Focus(
+      focusNode: widget.focusNode,
       autofocus: widget.autofocus,
-      onShowFocusHighlight: (focused) {
+      onFocusChange: (focused) {
         setState(() => _isFocused = focused);
         if (focused && widget.autoScroll && mounted) {
           Scrollable.ensureVisible(
             context,
             alignment: 0.35,
-            duration: const Duration(milliseconds: 120),
-            curve: Curves.easeOut,
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.easeOutCubic,
           );
         }
       },
-      actions: <Type, Action<Intent>>{
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
+      onKeyEvent: (node, event) {
+        if (event is KeyDownEvent) {
+          if (event.logicalKey == LogicalKeyboardKey.select ||
+              event.logicalKey == LogicalKeyboardKey.enter ||
+              event.logicalKey == LogicalKeyboardKey.numpadEnter ||
+              event.logicalKey == LogicalKeyboardKey.gameButtonA) {
             widget.onSelect();
-            return null;
-          },
-        ),
+            return KeyEventResult.handled;
+          }
+          if (widget.onMoveLeft != null &&
+              event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+            widget.onMoveLeft!();
+            return KeyEventResult.handled;
+          }
+        }
+        return KeyEventResult.ignored;
       },
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
@@ -823,6 +1313,7 @@ class TVIconButton extends StatelessWidget {
   final String? tooltip;
   final Color color;
   final double size;
+  final bool autofocus;
 
   const TVIconButton({
     super.key,
@@ -831,43 +1322,196 @@ class TVIconButton extends StatelessWidget {
     this.tooltip,
     this.color = Colors.white70,
     this.size = 20,
+    this.autofocus = false,
   });
 
   @override
   Widget build(BuildContext context) {
     return TVFocusableItem(
+      autofocus: autofocus,
       autoScroll: false,
       onSelect: onPressed,
-      builder: (context, isFocused) => Container(
-        padding: const EdgeInsets.all(7),
-        decoration: BoxDecoration(
-          color: isFocused
-              ? const Color(0xFF00E5FF).withOpacity(0.2)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(9),
-          border: Border.all(
-            color: isFocused ? const Color(0xFF00E5FF) : Colors.transparent,
-            width: 1.5,
+      builder: (context, isFocused) => AnimatedScale(
+        scale: isFocused ? 1.12 : 1.0,
+        duration: const Duration(milliseconds: 120),
+        child: Container(
+          padding: const EdgeInsets.all(7),
+          decoration: BoxDecoration(
+            color: isFocused
+                ? const Color(0xFF00E5FF).withOpacity(0.25)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(
+              color: isFocused ? const Color(0xFF00E5FF) : Colors.transparent,
+              width: 1.5,
+            ),
           ),
-        ),
-        child: Icon(
-          icon,
-          color: isFocused ? Colors.white : color,
-          size: size,
+          child: Icon(
+            icon,
+            color: isFocused ? Colors.white : color,
+            size: size,
+          ),
         ),
       ),
     );
   }
 }
 
+// =============================================================================
+// PÔSTER ESTILO CINEMA / STREAMING PARA FILMES E SÉRIES
+// =============================================================================
+Widget buildStreamingPosterCard({
+  required String title,
+  required String subtitle,
+  required String logoUrl,
+  required String badgeText,
+  required VoidCallback onTap,
+  bool isFocused = false,
+  bool isPlaying = false,
+  bool isFavorite = false,
+  VoidCallback? onFavoriteTap,
+}) {
+  return AnimatedScale(
+    scale: isFocused ? 1.06 : 1.0,
+    duration: const Duration(milliseconds: 160),
+    curve: Curves.easeOutCubic,
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 160),
+      decoration: BoxDecoration(
+        color: const Color(0xFF121622),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: isFocused
+              ? const Color(0xFF00E5FF)
+              : isPlaying
+                  ? const Color(0xFF2979FF)
+                  : Colors.white12,
+          width: isFocused ? 2.5 : 1,
+        ),
+        boxShadow: isFocused
+            ? [
+                BoxShadow(
+                  color: const Color(0xFF00E5FF).withOpacity(0.35),
+                  blurRadius: 16,
+                  offset: const Offset(0, 4),
+                )
+              ]
+            : null,
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(13),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            logoUrl.isNotEmpty
+                ? Image.network(
+                    logoUrl,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      color: const Color(0xFF101420),
+                      child: const Icon(Icons.movie_filter_rounded,
+                          color: Color(0xFF00E5FF), size: 42),
+                    ),
+                  )
+                : Container(
+                    color: const Color(0xFF101420),
+                    child: const Icon(Icons.movie_filter_rounded,
+                        color: Color(0xFF00E5FF), size: 42),
+                  ),
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withOpacity(0.35),
+                    Colors.transparent,
+                    Colors.black.withOpacity(0.92),
+                  ],
+                  stops: const [0.0, 0.45, 1.0],
+                ),
+              ),
+            ),
+            Positioned(
+              top: 8,
+              left: 8,
+              child: buildQualityBadge(badgeText),
+            ),
+            if (onFavoriteTap != null)
+              Positioned(
+                top: 6,
+                right: 6,
+                child: GestureDetector(
+                  onTap: onFavoriteTap,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Icon(
+                      isFavorite
+                          ? Icons.star_rounded
+                          : Icons.star_border_rounded,
+                      color: isFavorite ? Colors.amber : Colors.white70,
+                      size: 16,
+                    ),
+                  ),
+                ),
+              ),
+            Positioned(
+              bottom: 10,
+              left: 10,
+              right: 10,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                      height: 1.2,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Color(0xFF00E5FF),
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 Widget buildQualityBadge(String tag) {
   return Container(
-    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
     decoration: BoxDecoration(
       color: tag == '4K' || tag == 'FHD'
-          ? const Color(0xFF00E5FF).withOpacity(0.2)
-          : Colors.white10,
-      borderRadius: BorderRadius.circular(4),
+          ? const Color(0xFF00E5FF).withOpacity(0.25)
+          : Colors.black87,
+      borderRadius: BorderRadius.circular(5),
+      border: Border.all(
+        color: tag == '4K' || tag == 'FHD'
+            ? const Color(0xFF00E5FF).withOpacity(0.6)
+            : Colors.white24,
+        width: 0.8,
+      ),
     ),
     child: Text(
       tag,
@@ -876,7 +1520,7 @@ Widget buildQualityBadge(String tag) {
         fontWeight: FontWeight.bold,
         color: tag == '4K' || tag == 'FHD'
             ? const Color(0xFF00E5FF)
-            : Colors.white70,
+            : Colors.white,
       ),
     ),
   );
@@ -905,6 +1549,9 @@ Widget buildChannelLogo(String url, {double size = 44}) {
   );
 }
 
+// =============================================================================
+// PARSER AVANÇADO COM EXTRAÇÃO DE TEMPORADA E EPISÓDIO PARA SÉRIES
+// =============================================================================
 List<StreamItem> parseM3UAdvanced(String raw) {
   final List<StreamItem> result = [];
   final lines = const LineSplitter().convert(raw);
@@ -919,7 +1566,11 @@ List<StreamItem> parseM3UAdvanced(String raw) {
   final qualityRegex = RegExp(
       r'\b(4K|UHD|FHD|1080P|HD|720P|SD|H265|HEVC)\b',
       caseSensitive: false);
-  final seriesRegex = RegExp(r'\bS\d+\s*E\d+\b', caseSensitive: false);
+  final sePattern1 =
+      RegExp(r'[sS](\d{1,2})\s*[eE](\d{1,3})', caseSensitive: false);
+  final sePattern2 =
+      RegExp(r'[tT](\d{1,2})\s*[eE](\d{1,3})', caseSensitive: false);
+  final sePattern3 = RegExp(r'\b(\d{1,2})x(\d{1,3})\b', caseSensitive: false);
 
   for (final line in lines) {
     final trimmed = line.trim();
@@ -943,11 +1594,15 @@ List<StreamItem> parseM3UAdvanced(String raw) {
       final lowerGroup = group.toLowerCase();
       final lowerName = name.toLowerCase();
 
+      RegExpMatch? seMatch = sePattern1.firstMatch(name) ??
+          sePattern2.firstMatch(name) ??
+          sePattern3.firstMatch(name);
+
       ContentType type = ContentType.live;
       if (lowerUrl.contains('/series/') ||
           lowerGroup.contains('série') ||
           lowerGroup.contains('serie') ||
-          seriesRegex.hasMatch(name)) {
+          seMatch != null) {
         type = ContentType.series;
       } else if (lowerUrl.contains('/movie/') ||
           lowerGroup.contains('filme') ||
@@ -979,6 +1634,26 @@ List<StreamItem> parseM3UAdvanced(String raw) {
           .replaceAll(RegExp(r'\s+'), ' ')
           .trim();
 
+      int seasonNum = 1;
+      int episodeNum = 1;
+      String extractedSeriesName = cleanName;
+
+      if (type == ContentType.series) {
+        if (seMatch != null) {
+          seasonNum = int.tryParse(seMatch.group(1) ?? '1') ?? 1;
+          episodeNum = int.tryParse(seMatch.group(2) ?? '1') ?? 1;
+          extractedSeriesName = name
+              .substring(0, seMatch.start)
+              .replaceAll(qualityRegex, '')
+              .replaceAll(RegExp(r'[\[\]\(\)\-\|\:]'), ' ')
+              .replaceAll(RegExp(r'\s+'), ' ')
+              .trim();
+        }
+        if (extractedSeriesName.isEmpty) {
+          extractedSeriesName = cleanName.isNotEmpty ? cleanName : name;
+        }
+      }
+
       final isAdult = lowerGroup.contains('adult') ||
           lowerGroup.contains('xxx') ||
           lowerGroup.contains('+18') ||
@@ -989,6 +1664,9 @@ List<StreamItem> parseM3UAdvanced(String raw) {
           id: '${counter}_${trimmed.hashCode}',
           name: name.isNotEmpty ? name : 'Canal $counter',
           cleanName: cleanName.isNotEmpty ? cleanName : name,
+          seriesName: extractedSeriesName,
+          seasonNumber: seasonNum,
+          episodeNumber: episodeNum,
           qualityTag: quality,
           group: group,
           logo: logo,
