@@ -187,7 +187,6 @@ class EpgService {
       return _cache[item.id]!;
     }
 
-    // 1. Consulta EPG via Xtream Codes API quando disponível
     if (serverDns.isNotEmpty &&
         username.isNotEmpty &&
         password.isNotEmpty &&
@@ -229,7 +228,6 @@ class EpgService {
       } catch (_) {}
     }
 
-    // 2. Fallback inteligente por horário e metadados do canal
     final now = DateTime.now();
     final hourStr = '${now.hour.toString().padLeft(2, '0')}:00';
     final nextHourStr = '${((now.hour + 1) % 24).toString().padLeft(2, '0')}:00';
@@ -287,14 +285,12 @@ class SharedStreamEngine extends ChangeNotifier {
     measuredSpeedMbps = speedMbps;
   }
 
-  /// Inicia ou mantém o vídeo atual rodando sem reiniciar caso já esteja ativo
   Future<void> openStream(
     StreamItem item, {
     Duration? startPosition,
     bool forceReload = false,
     bool tryHlsFallback = false,
   }) async {
-    // SE O MESMO FLUXO JÁ ESTÁ TOCANDO, NÃO REINICIA!
     if (!forceReload &&
         currentItem?.url == item.url &&
         controller != null &&
@@ -320,7 +316,6 @@ class SharedStreamEngine extends ChangeNotifier {
     if (!tryHlsFallback) _recoveryAttempts = 0;
     notifyListeners();
 
-    // Busca o EPG em paralelo sem bloquear o vídeo
     EpgService.fetchEpgForChannel(
       item: item,
       serverDns: serverDns,
@@ -350,7 +345,6 @@ class SharedStreamEngine extends ChangeNotifier {
       await newController.initialize();
       if (currentItem?.id != item.id) return;
 
-      // Baixa latência para TV ao vivo vs Posição salva para Filmes/Séries
       if (item.type != ContentType.live &&
           startPosition != null &&
           startPosition.inSeconds > 5) {
@@ -394,7 +388,6 @@ class SharedStreamEngine extends ChangeNotifier {
       final val = ctrl.value;
       if (!val.isPlaying) return;
 
-      // Salva progresso automático de Filmes e Episódios a cada 6 segundos
       if (item.type != ContentType.live) {
         _vodSaveTick++;
         if (_vodSaveTick >= 3) {
@@ -403,7 +396,6 @@ class SharedStreamEngine extends ChangeNotifier {
         }
       }
 
-      // Monitor Anti-Travamento e Baixa Latência
       if (val.position == _lastPosition && val.isBuffering) {
         _stallCounter++;
         if (_stallCounter >= 2 && !isRecovering) {
@@ -411,7 +403,6 @@ class SharedStreamEngine extends ChangeNotifier {
           notifyListeners();
 
           if (item.type == ContentType.live) {
-            // Em canais ao vivo, pula para o pacote mais recente do buffer para zerar atraso
             if (val.buffered.isNotEmpty) {
               final liveEdge = val.buffered.last.end;
               if (liveEdge > val.position + const Duration(seconds: 2)) {
@@ -773,9 +764,6 @@ Future<void> showExitAppConfirmationDialog(BuildContext context) async {
   );
 }
 
-// =============================================================================
-// DIÁLOGO DE RETOMADA DE PROGRESSO ("CONTINUAR DE ONDE PAROU")
-// =============================================================================
 Future<Duration?> showVodResumePrompt({
   required BuildContext context,
   required VodProgressEntry entry,
@@ -870,7 +858,7 @@ Future<Duration?> showVodResumePrompt({
 }
 
 // =============================================================================
-// MODAL STREAMING DE TEMPORADAS E EPISÓDIOS DA SÉRIE (COM BARRA DE PROGRESSO)
+// MODAL STREAMING DE TEMPORADAS E EPISÓDIOS DA SÉRIE
 // =============================================================================
 Future<void> openSeriesDetailsModal({
   required BuildContext context,
@@ -1242,8 +1230,10 @@ Future<void> openSeriesDetailsModal({
 }
 
 // =============================================================================
-// TECLADO VIRTUAL QWERTY INTEGRADO DE TV (DOCK INFERIOR TRANSLÚCIDO + MENU WEB)
+// TECLADO VIRTUAL MINIMALISTA ESTILO YOUTUBE TV (QWERTY + 2 ATALHOS INTERNOS + BOTÃO CONTINUAR EXTERNO)
 // =============================================================================
+enum _TVKeyboardView { qwerty, symbols, web }
+
 Future<void> openTVVirtualKeyboard({
   required BuildContext context,
   required TextEditingController controller,
@@ -1255,41 +1245,24 @@ Future<void> openTVVirtualKeyboard({
 }) async {
   String currentText = controller.text;
   bool isUppercase = false;
-  bool showWebShortcutsMenu = false;
+  _TVKeyboardView activeView = _TVKeyboardView.qwerty;
 
-  final List<String> qwertyRows = [
-    '1234567890',
-    'qwertyuiop',
-    'asdfghjkl',
-    'zxcvbnm',
+  final List<List<String>> symbolRows = [
+    ['@', '#', '\$', '%', '&', '*', '+', '=', '?', '!', '~', '^'],
+    ['(', ')', '[', ']', '{', '}', '<', '>', '|', '\\', '/', ':'],
+    [';', '\'', '"', ',', '.', '-', '_', 'ç', 'á', 'é', 'í', 'ó'],
   ];
 
-  final List<String> webShortcuts = [
-    'http://',
-    'https://',
-    '.club',
-    '.com',
-    '.net',
-    '.org',
-    '.br',
-    ':80',
-    ':8080',
-    '/get.php?',
-    '/',
-    ':',
-    '.',
-    '-',
-    '_',
-    '?',
-    '=',
-    '&',
-    '@',
+  final List<List<String>> webShortcutRows = [
+    ['http://', 'https://', 'www.', '.club', '.com', '.net'],
+    ['.org', '.br', '.tv', '.xyz', ':80', ':8080'],
+    ['/get.php?', 'username=', '&password=', '&type=m3u_plus', '&output=ts'],
   ];
 
   await showDialog(
     context: context,
-    // Mantém o fundo transparente para visualizar os canais/filmes sendo filtrados ao vivo!
-    barrierColor: Colors.black.withOpacity(0.18),
+    // Zero escurecimento para não atrapalhar a visualização dos conteúdos ao fundo!
+    barrierColor: Colors.transparent,
     barrierDismissible: true,
     builder: (ctx) {
       return StatefulBuilder(
@@ -1320,257 +1293,422 @@ Future<void> openTVVirtualKeyboard({
             onChanged?.call('');
           }
 
-          return Align(
-            alignment: Alignment.bottomCenter,
-            child: Material(
-              color: Colors.transparent,
-              child: Container(
-                width: 720,
-                margin: const EdgeInsets.only(bottom: 12, left: 16, right: 16),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF0B0E17).withOpacity(0.95),
-                  borderRadius: BorderRadius.circular(20),
-                  border:
-                      Border.all(color: const Color(0xFF00E5FF), width: 1.5),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.75),
-                      blurRadius: 24,
-                      offset: const Offset(0, -4),
-                    )
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // BARRA COMPACTA COM VISOR DO TEXTO AO VIVO
-                    Row(
-                      children: [
-                        const Icon(Icons.keyboard_rounded,
-                            color: Color(0xFF00E5FF), size: 18),
-                        const SizedBox(width: 8),
-                        Text(
-                          '$title:',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF00E5FF),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 7),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF06080C),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: Colors.white12),
-                            ),
-                            child: Text(
-                              currentText.isEmpty
-                                  ? 'Digite usando as setas do controle...'
-                                  : '$currentText▌',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.bold,
-                                color: currentText.isEmpty
-                                    ? Colors.white38
-                                    : Colors.white,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        _buildKeyButton(
-                          label: '✓ OK',
-                          width: 72,
-                          height: 32,
-                          color: const Color(0xFF00E5FF),
-                          textColor: Colors.black,
-                          onTap: () {
-                            Navigator.pop(ctx);
-                            onCompleted?.call();
-                          },
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
+          String c(String ch) => isUppercase ? ch.toUpperCase() : ch;
 
-                    // SUB-MENU UNIFICADO DE ATALHOS DE INTERNET (ACESSADO PELA TECLA 🌐 WEB)
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 180),
-                      child: showWebShortcutsMenu
-                          ? Container(
-                              key: const ValueKey('web_shortcuts_panel'),
-                              padding: const EdgeInsets.all(10),
-                              margin: const EdgeInsets.only(bottom: 8),
+          return PopScope(
+            canPop: activeView == _TVKeyboardView.qwerty,
+            onPopInvoked: (didPop) {
+              if (!didPop && activeView != _TVKeyboardView.qwerty) {
+                setModalState(() => activeView = _TVKeyboardView.qwerty);
+              }
+            },
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 10, left: 12, right: 12),
+                child: Material(
+                  color: Colors.transparent,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      // 1. BLOCO COMPACTO DO TECLADO (MÍNIMO DE ESPAÇO NA TELA)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0A0D14).withOpacity(0.94),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: const Color(0xFF00E5FF).withOpacity(0.55),
+                            width: 1.2,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.75),
+                              blurRadius: 18,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // Visor micro embutido para acompanhar o texto sem ocupar altura extra
+                            Container(
+                              width: isNumericOnly ? 280 : 450,
+                              margin: const EdgeInsets.only(bottom: 6),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
                               decoration: BoxDecoration(
-                                color: const Color(0xFF131929),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                    color: const Color(0xFF00E5FF)
-                                        .withOpacity(0.4)),
+                                color: const Color(0xFF05070B),
+                                borderRadius: BorderRadius.circular(7),
+                                border: Border.all(color: Colors.white10),
                               ),
-                              child: Column(
+                              child: Row(
                                 children: [
-                                  const Text(
-                                    'ATALHOS RÁPIDOS DE INTERNET E SÍMBOLOS',
-                                    style: TextStyle(
+                                  Text(
+                                    '$title: ',
+                                    style: const TextStyle(
                                       fontSize: 10,
-                                      fontWeight: FontWeight.bold,
                                       color: Color(0xFF00E5FF),
+                                      fontWeight: FontWeight.bold,
                                     ),
                                   ),
-                                  const SizedBox(height: 8),
-                                  Wrap(
-                                    spacing: 6,
-                                    runSpacing: 6,
-                                    alignment: WrapAlignment.center,
-                                    children:
-                                        webShortcuts.asMap().entries.map((e) {
-                                      return _buildKeyButton(
-                                        label: e.value,
-                                        height: 32,
-                                        autofocus: e.key == 0,
-                                        color: const Color(0xFF1A253B),
-                                        textColor: const Color(0xFF00E5FF),
-                                        onTap: () => appendText(e.value),
-                                      );
-                                    }).toList(),
+                                  Expanded(
+                                    child: Text(
+                                      currentText.isEmpty
+                                          ? '...'
+                                          : '$currentText▌',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                        color: currentText.isEmpty
+                                            ? Colors.white30
+                                            : Colors.white,
+                                      ),
+                                    ),
                                   ),
                                 ],
                               ),
-                            )
-                          : isNumericOnly
-                              ? Padding(
-                                  key: const ValueKey('numeric_rows'),
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 6),
-                                  child: Wrap(
-                                    spacing: 8,
-                                    runSpacing: 8,
-                                    alignment: WrapAlignment.center,
-                                    children:
-                                        '1234567890'.split('').map((digit) {
-                                      return _buildKeyButton(
-                                        label: digit,
-                                        width: 52,
-                                        height: 38,
-                                        autofocus: digit == '1',
-                                        onTap: () => appendText(digit),
-                                      );
-                                    }).toList(),
-                                  ),
-                                )
-                              : Column(
-                                  key: const ValueKey('qwerty_rows'),
-                                  children:
-                                      qwertyRows.asMap().entries.map((entry) {
-                                    final rIdx = entry.key;
-                                    final chars = entry.value.split('');
-                                    return Padding(
-                                      padding: const EdgeInsets.only(bottom: 4),
-                                      child: Wrap(
-                                        spacing: 5,
-                                        runSpacing: 4,
-                                        alignment: WrapAlignment.center,
-                                        children: chars
-                                            .asMap()
-                                            .entries
-                                            .map((charEntry) {
-                                          final raw = charEntry.value;
-                                          final ch = isUppercase
-                                              ? raw.toUpperCase()
-                                              : raw;
-                                          return _buildKeyButton(
-                                            label: ch,
-                                            width: 44,
-                                            height: 32,
-                                            autofocus: rIdx == 1 &&
-                                                charEntry.key == 0,
-                                            onTap: () => appendText(ch),
-                                          );
-                                        }).toList(),
-                                      ),
-                                    );
-                                  }).toList(),
-                                ),
-                    ),
+                            ),
 
-                    // BARRA DE FUNÇÕES + PEQUENA TECLA DE MENU DE ATALHOS WEB
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      alignment: WrapAlignment.center,
-                      children: [
-                        if (!isNumericOnly)
-                          _buildKeyButton(
-                            label: isUppercase ? '⇧ ABC' : '⇧ abc',
-                            height: 32,
-                            color: isUppercase
-                                ? const Color(0xFF00E5FF)
-                                : const Color(0xFF1C202E),
-                            textColor:
-                                isUppercase ? Colors.black : Colors.white,
-                            onTap: () => setModalState(
-                                () => isUppercase = !isUppercase),
-                          ),
-                        if (!isNumericOnly)
-                          _buildKeyButton(
-                            label: showWebShortcutsMenu
-                                ? '⌨ QWERTY'
-                                : '🌐 Atalhos Web',
-                            height: 32,
-                            color: showWebShortcutsMenu
-                                ? const Color(0xFF00E5FF)
-                                : const Color(0xFF17243A),
-                            textColor: showWebShortcutsMenu
-                                ? Colors.black
-                                : const Color(0xFF00E5FF),
-                            onTap: () => setModalState(() =>
-                                showWebShortcutsMenu = !showWebShortcutsMenu),
-                          ),
-                        if (!isNumericOnly)
-                          _buildKeyButton(
-                            label: 'ESPAÇO',
-                            width: 110,
-                            height: 32,
-                            color: const Color(0xFF1C202E),
-                            onTap: () => appendText(' '),
-                          ),
-                        _buildKeyButton(
-                          label: '⌫ Apagar',
-                          height: 32,
-                          color: const Color(0xFF2C1D24),
-                          textColor: Colors.orangeAccent,
-                          onTap: backspace,
+                            // GRADE DE TECLAS (NUMÉRICO, SÍMBOLOS, ATALHOS WEB OU QWERTY)
+                            if (isNumericOnly) ...[
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  for (final d in [
+                                    '1',
+                                    '2',
+                                    '3',
+                                    '4',
+                                    '5',
+                                    '6',
+                                    '7',
+                                    '8',
+                                    '9',
+                                    '0'
+                                  ])
+                                    _buildMinimalKey(
+                                      label: d,
+                                      width: 34,
+                                      autofocus: d == '1',
+                                      onTap: () => appendText(d),
+                                    ),
+                                  _buildMinimalKey(
+                                    label: '⌫',
+                                    width: 38,
+                                    color: const Color(0xFF281A22),
+                                    textColor: Colors.orangeAccent,
+                                    onTap: backspace,
+                                  ),
+                                  _buildMinimalKey(
+                                    label: '✖',
+                                    width: 34,
+                                    color: const Color(0xFF281A22),
+                                    textColor: Colors.redAccent,
+                                    onTap: clearAll,
+                                  ),
+                                ],
+                              ),
+                            ] else if (activeView ==
+                                _TVKeyboardView.symbols) ...[
+                              for (int r = 0; r < symbolRows.length; r++)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 3),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      for (int i = 0;
+                                          i < symbolRows[r].length;
+                                          i++)
+                                        _buildMinimalKey(
+                                          label: symbolRows[r][i],
+                                          width: 35,
+                                          autofocus: r == 0 && i == 0,
+                                          onTap: () =>
+                                              appendText(symbolRows[r][i]),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                            ] else if (activeView == _TVKeyboardView.web) ...[
+                              for (int r = 0; r < webShortcutRows.length; r++)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 3),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      for (int i = 0;
+                                          i < webShortcutRows[r].length;
+                                          i++)
+                                        _buildMinimalKey(
+                                          label: webShortcutRows[r][i],
+                                          autofocus: r == 0 && i == 0,
+                                          color: const Color(0xFF152036),
+                                          textColor: const Color(0xFF00E5FF),
+                                          onTap: () =>
+                                              appendText(webShortcutRows[r][i]),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                            ] else ...[
+                              // MODO PADRÃO QWERTY MINIMALISTA (3 LINHAS SUPERIORES)
+                              // Linha 1: Números + Hífen e Ponto
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 3),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    for (final k in [
+                                      '1',
+                                      '2',
+                                      '3',
+                                      '4',
+                                      '5',
+                                      '6',
+                                      '7',
+                                      '8',
+                                      '9',
+                                      '0',
+                                      '-',
+                                      '.'
+                                    ])
+                                      _buildMinimalKey(
+                                        label: k,
+                                        width: 35,
+                                        onTap: () => appendText(k),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              // Linha 2: Q W E R T Y U I O P / :
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 3),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    for (final k in [
+                                      'q',
+                                      'w',
+                                      'e',
+                                      'r',
+                                      't',
+                                      'y',
+                                      'u',
+                                      'i',
+                                      'o',
+                                      'p'
+                                    ])
+                                      _buildMinimalKey(
+                                        label: c(k),
+                                        width: 35,
+                                        autofocus: k == 'q',
+                                        onTap: () => appendText(c(k)),
+                                      ),
+                                    _buildMinimalKey(
+                                      label: '/',
+                                      width: 35,
+                                      onTap: () => appendText('/'),
+                                    ),
+                                    _buildMinimalKey(
+                                      label: ':',
+                                      width: 35,
+                                      onTap: () => appendText(':'),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              // Linha 3: Shift + A S D F G H J K L _ + Apagar
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 3),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    _buildMinimalKey(
+                                      label: '⇧',
+                                      width: 35,
+                                      color: isUppercase
+                                          ? const Color(0xFF00E5FF)
+                                          : const Color(0xFF1A2030),
+                                      textColor: isUppercase
+                                          ? Colors.black
+                                          : Colors.white,
+                                      onTap: () => setModalState(
+                                          () => isUppercase = !isUppercase),
+                                    ),
+                                    for (final k in [
+                                      'a',
+                                      's',
+                                      'd',
+                                      'f',
+                                      'g',
+                                      'h',
+                                      'j',
+                                      'k',
+                                      'l'
+                                    ])
+                                      _buildMinimalKey(
+                                        label: c(k),
+                                        width: 35,
+                                        onTap: () => appendText(c(k)),
+                                      ),
+                                    _buildMinimalKey(
+                                      label: '_',
+                                      width: 35,
+                                      onTap: () => appendText('_'),
+                                    ),
+                                    _buildMinimalKey(
+                                      label: '⌫',
+                                      width: 35,
+                                      color: const Color(0xFF281A22),
+                                      textColor: Colors.orangeAccent,
+                                      onTap: backspace,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+
+                            // LINHA 4 INTEGRADA (CONTÉM OS 2 BOTÕES DISCRETOS: #+= E 🌐 + Z-M + ESPAÇO)
+                            if (!isNumericOnly)
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  // Botão Discreto 1: Símbolos e Caracteres Especiais
+                                  _buildMinimalKey(
+                                    label: activeView == _TVKeyboardView.symbols
+                                        ? 'ABC'
+                                        : '#+=',
+                                    width: 40,
+                                    color: activeView == _TVKeyboardView.symbols
+                                        ? const Color(0xFF00E5FF)
+                                        : const Color(0xFF172234),
+                                    textColor:
+                                        activeView == _TVKeyboardView.symbols
+                                            ? Colors.black
+                                            : const Color(0xFF00E5FF),
+                                    onTap: () => setModalState(() {
+                                      activeView =
+                                          activeView == _TVKeyboardView.symbols
+                                              ? _TVKeyboardView.qwerty
+                                              : _TVKeyboardView.symbols;
+                                    }),
+                                  ),
+                                  // Botão Discreto 2: Atalhos de Internet
+                                  _buildMinimalKey(
+                                    label: activeView == _TVKeyboardView.web
+                                        ? 'ABC'
+                                        : '🌐',
+                                    width: 36,
+                                    color: activeView == _TVKeyboardView.web
+                                        ? const Color(0xFF00E5FF)
+                                        : const Color(0xFF172234),
+                                    textColor: activeView == _TVKeyboardView.web
+                                        ? Colors.black
+                                        : const Color(0xFF00E5FF),
+                                    onTap: () => setModalState(() {
+                                      activeView =
+                                          activeView == _TVKeyboardView.web
+                                              ? _TVKeyboardView.qwerty
+                                              : _TVKeyboardView.web;
+                                    }),
+                                  ),
+                                  // Letras finais Z X C V B N M
+                                  for (final k in [
+                                    'z',
+                                    'x',
+                                    'c',
+                                    'v',
+                                    'b',
+                                    'n',
+                                    'm'
+                                  ])
+                                    _buildMinimalKey(
+                                      label: c(k),
+                                      width: 35,
+                                      onTap: () => appendText(c(k)),
+                                    ),
+                                  // Barra de Espaço Compacta
+                                  _buildMinimalKey(
+                                    label: '␣',
+                                    width: 66,
+                                    color: const Color(0xFF1A2030),
+                                    onTap: () => appendText(' '),
+                                  ),
+                                  // Botão discreto de limpar tudo
+                                  _buildMinimalKey(
+                                    label: '✖',
+                                    width: 35,
+                                    color: const Color(0xFF281A22),
+                                    textColor: Colors.redAccent,
+                                    onTap: clearAll,
+                                  ),
+                                ],
+                              ),
+                          ],
                         ),
-                        _buildKeyButton(
-                          label: 'Limpar',
-                          height: 32,
-                          color: const Color(0xFF2C1D24),
-                          textColor: Colors.redAccent,
-                          onTap: clearAll,
+                      ),
+
+                      const SizedBox(width: 8),
+
+                      // 2. FORA DO TECLADO: APENAS O BOTÃO DE CONTINUAR
+                      TVFocusableItem(
+                        autoScroll: false,
+                        onSelect: () {
+                          Navigator.pop(ctx);
+                          onCompleted?.call();
+                        },
+                        builder: (context, isFocused) => AnimatedScale(
+                          scale: isFocused ? 1.06 : 1.0,
+                          duration: const Duration(milliseconds: 100),
+                          child: Container(
+                            height: 44,
+                            padding: const EdgeInsets.symmetric(horizontal: 18),
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                colors: [Color(0xFF00E5FF), Color(0xFF2979FF)],
+                              ),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: isFocused
+                                    ? Colors.white
+                                    : Colors.transparent,
+                                width: 2,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.6),
+                                  blurRadius: 12,
+                                ),
+                              ],
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  'Continuar',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w900,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                                SizedBox(width: 4),
+                                Icon(Icons.arrow_forward_rounded,
+                                    size: 16, color: Colors.black),
+                              ],
+                            ),
+                          ),
                         ),
-                        _buildKeyButton(
-                          label: 'Concluir',
-                          width: 95,
-                          height: 32,
-                          color: const Color(0xFF00E5FF),
-                          textColor: Colors.black,
-                          onTap: () {
-                            Navigator.pop(ctx);
-                            onCompleted?.call();
-                          },
-                        ),
-                      ],
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -1581,41 +1719,44 @@ Future<void> openTVVirtualKeyboard({
   );
 }
 
-Widget _buildKeyButton({
+Widget _buildMinimalKey({
   required String label,
   required VoidCallback onTap,
   double? width,
-  double height = 34,
-  Color color = const Color(0xFF181C28),
+  double height = 29,
+  Color color = const Color(0xFF151924),
   Color textColor = Colors.white,
   bool autofocus = false,
 }) {
-  return TVFocusableItem(
-    autofocus: autofocus,
-    autoScroll: false,
-    onSelect: onTap,
-    builder: (context, isFocused) => AnimatedScale(
-      scale: isFocused ? 1.08 : 1.0,
-      duration: const Duration(milliseconds: 80),
-      child: Container(
-        width: width,
-        height: height,
-        padding: EdgeInsets.symmetric(horizontal: width == null ? 10 : 0),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: isFocused ? const Color(0xFF00E5FF) : color,
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(
-            color: isFocused ? Colors.white : Colors.white12,
-            width: isFocused ? 1.8 : 1,
+  return Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 1.5),
+    child: TVFocusableItem(
+      autofocus: autofocus,
+      autoScroll: false,
+      onSelect: onTap,
+      builder: (context, isFocused) => AnimatedScale(
+        scale: isFocused ? 1.12 : 1.0,
+        duration: const Duration(milliseconds: 70),
+        child: Container(
+          width: width,
+          height: height,
+          padding: EdgeInsets.symmetric(horizontal: width == null ? 8 : 0),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: isFocused ? const Color(0xFF00E5FF) : color,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color: isFocused ? Colors.white : Colors.white10,
+              width: isFocused ? 1.5 : 0.8,
+            ),
           ),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
-            color: isFocused ? Colors.black : textColor,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.bold,
+              color: isFocused ? Colors.black : textColor,
+            ),
           ),
         ),
       ),
@@ -1766,7 +1907,7 @@ class _AdaptiveInputFieldState extends State<AdaptiveInputField> {
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Text(
-                'OK p/ Teclado TV',
+                'OK p/ Digitar',
                 style: TextStyle(
                   fontSize: 10,
                   fontWeight: FontWeight.bold,
@@ -2262,7 +2403,7 @@ Widget buildChannelLogo(String url, {double size = 44}) {
 }
 
 // =============================================================================
-// PARSER M3U EM SEGUNDO PLANO (EXTRAI STREAM_ID, TVG_ID, SÉRIES E QUALIDADE)
+// PARSER M3U EM SEGUNDO PLANO
 // =============================================================================
 List<StreamItem> parseM3UAdvanced(String raw) {
   final List<StreamItem> result = [];
