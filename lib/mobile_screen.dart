@@ -449,7 +449,6 @@ class MobileDashboardView extends StatelessWidget {
 
     return Column(
       children: [
-        // 1. TOPO FLUIDO
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: const BoxDecoration(
@@ -505,8 +504,6 @@ class MobileDashboardView extends StatelessWidget {
             ],
           ),
         ),
-
-        // 2. MINI PLAYER DE PRÉ-VISUALIZAÇÃO + GUIA EPG AO VIVO
         AnimatedSize(
           duration: const Duration(milliseconds: 220),
           curve: Curves.easeOutCubic,
@@ -614,7 +611,6 @@ class MobileDashboardView extends StatelessWidget {
                         ),
                       ),
                     ),
-                    // FAIXA COMPACTA DE EPG NO CELULAR
                     if (activeEpg != null &&
                         activeItem!.type == ContentType.live)
                       Container(
@@ -657,8 +653,6 @@ class MobileDashboardView extends StatelessWidget {
                 )
               : const SizedBox.shrink(),
         ),
-
-        // 3. BUSCA E FILTRO DE GÊNEROS
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
           child: Row(
@@ -726,8 +720,6 @@ class MobileDashboardView extends StatelessWidget {
             ],
           ),
         ),
-
-        // 4. BARRA DESLIZANTE DE GÊNEROS
         SizedBox(
           height: 38,
           child: ListView.builder(
@@ -758,8 +750,6 @@ class MobileDashboardView extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 6),
-
-        // 5. CARROSSEL "CONTINUAR ASSISTINDO" (QUANDO EM FILMES/SÉRIES)
         if ((activeSection == MainSection.movie ||
                 activeSection == MainSection.series) &&
             selectedCategory == 'Todas' &&
@@ -856,8 +846,6 @@ class MobileDashboardView extends StatelessWidget {
               ],
             ),
           ),
-
-        // 6. GRADE OU LISTA PRINCIPAL
         Expanded(
           child: AnimatedSwitcher(
             duration: const Duration(milliseconds: 220),
@@ -884,7 +872,7 @@ class MobileDashboardView extends StatelessWidget {
     return GridView.builder(
       key: ValueKey('series_grid_$selectedCategory'),
       padding: const EdgeInsets.all(12),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisExtent(
         crossAxisCount: 3,
         childAspectRatio: 0.64,
         crossAxisSpacing: 10,
@@ -920,7 +908,7 @@ class MobileDashboardView extends StatelessWidget {
     return GridView.builder(
       key: ValueKey('movies_grid_${activeSection}_$selectedCategory'),
       padding: const EdgeInsets.all(12),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisExtent(
         crossAxisCount: 3,
         childAspectRatio: 0.64,
         crossAxisSpacing: 10,
