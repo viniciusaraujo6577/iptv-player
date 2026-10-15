@@ -16,6 +16,7 @@ class MobileDashboardView extends StatelessWidget {
   final int recentsCount;
   final String accountExpDate;
   final List<StreamItem> displayedItems;
+  final List<SeriesGroup> displayedSeries;
   final Set<String> favoriteIds;
   final StreamItem? activeItem;
   final bool isMiniPipFloating;
@@ -28,6 +29,7 @@ class MobileDashboardView extends StatelessWidget {
   final VoidCallback onClearSearch;
   final ValueChanged<StreamItem> onStartPreview;
   final ValueChanged<StreamItem> onOpenFullScreen;
+  final ValueChanged<SeriesGroup> onSelectSeriesGroup;
   final ValueChanged<StreamItem> onToggleFavorite;
   final VoidCallback onEnableMiniPip;
   final VoidCallback onOpenSpeedTest;
@@ -51,6 +53,7 @@ class MobileDashboardView extends StatelessWidget {
     required this.recentsCount,
     required this.accountExpDate,
     required this.displayedItems,
+    required this.displayedSeries,
     required this.favoriteIds,
     required this.activeItem,
     required this.isMiniPipFloating,
@@ -63,6 +66,7 @@ class MobileDashboardView extends StatelessWidget {
     required this.onClearSearch,
     required this.onStartPreview,
     required this.onOpenFullScreen,
+    required this.onSelectSeriesGroup,
     required this.onToggleFavorite,
     required this.onEnableMiniPip,
     required this.onOpenSpeedTest,
@@ -76,7 +80,7 @@ class MobileDashboardView extends StatelessWidget {
       context: context,
       backgroundColor: const Color(0xFF12151F),
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
       ),
       builder: (ctx) {
         return SafeArea(
@@ -89,7 +93,7 @@ class MobileDashboardView extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(
-                        'Categorias de $sectionTitle (${sectionCategories.length})',
+                        'Gêneros / Categorias de $sectionTitle (${sectionCategories.length})',
                         style: const TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
@@ -115,13 +119,13 @@ class MobileDashboardView extends StatelessWidget {
                     final isSelected = cat == selectedCategory;
                     return ListTile(
                       shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(12),
                       ),
                       selected: isSelected,
                       selectedTileColor:
                           const Color(0xFF00E5FF).withOpacity(0.18),
                       leading: Icon(
-                        Icons.folder_outlined,
+                        Icons.folder_special_outlined,
                         color: isSelected
                             ? const Color(0xFF00E5FF)
                             : Colors.white54,
@@ -251,7 +255,7 @@ class MobileDashboardView extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.fromLTRB(18, 16, 18, 6),
               child: Text(
-                'ESCOLHA O TIPO DE CONTEÚDO',
+                'NAVEGAÇÃO PRINCIPAL',
                 style: TextStyle(
                   fontSize: 10,
                   fontWeight: FontWeight.bold,
@@ -270,12 +274,12 @@ class MobileDashboardView extends StatelessWidget {
                     icon: Icons.live_tv_rounded,
                     selected: activeSection == MainSection.live,
                     onTap: () {
-                      Navigator.pop(context);
+                      Navigator.pop(context); // Oculta o menu lateral automaticamente
                       onSelectSection(MainSection.live);
                     },
                   ),
                   _buildDrawerItem(
-                    title: 'Filmes',
+                    title: 'Filmes (Cinema)',
                     count: movieCount,
                     icon: Icons.movie_creation_outlined,
                     selected: activeSection == MainSection.movie,
@@ -285,7 +289,7 @@ class MobileDashboardView extends StatelessWidget {
                     },
                   ),
                   _buildDrawerItem(
-                    title: 'Séries',
+                    title: 'Séries (Catálogo)',
                     count: seriesCount,
                     icon: Icons.video_library_outlined,
                     selected: activeSection == MainSection.series,
@@ -363,7 +367,8 @@ class MobileDashboardView extends StatelessWidget {
     required bool selected,
     required VoidCallback onTap,
   }) {
-    return Container(
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
       margin: const EdgeInsets.symmetric(vertical: 3),
       decoration: BoxDecoration(
         gradient: selected
@@ -417,9 +422,15 @@ class MobileDashboardView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
+    final isSeriesView = activeSection == MainSection.series;
+    final isMovieView = activeSection == MainSection.movie;
+    final countLabel = isSeriesView
+        ? '${displayedSeries.length} séries'
+        : '${displayedItems.length} itens';
 
     return Column(
       children: [
+        // 1. CABEÇALHO FLUIDO
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: const BoxDecoration(
@@ -429,7 +440,7 @@ class MobileDashboardView extends StatelessWidget {
           child: Row(
             children: [
               IconButton(
-                tooltip: 'Abrir Menu Lateral',
+                tooltip: 'Menu Principal',
                 icon: const Icon(Icons.menu_rounded,
                     color: Color(0xFF00E5FF), size: 26),
                 onPressed: () => scaffoldKey.currentState?.openDrawer(),
@@ -449,7 +460,7 @@ class MobileDashboardView extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      '$selectedCategory • ${displayedItems.length} conteúdos',
+                      '$selectedCategory • $countLabel',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -475,81 +486,96 @@ class MobileDashboardView extends StatelessWidget {
             ],
           ),
         ),
-        if (activeItem != null && !isMiniPipFloating && !isKeyboardOpen)
-          AspectRatio(
-            aspectRatio: 16 / 9,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Container(
-                  color: Colors.black,
-                  child: miniVideoWidget,
-                ),
-                Positioned(
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.bottomCenter,
-                        end: Alignment.topCenter,
-                        colors: [Colors.black87, Colors.transparent],
-                      ),
-                    ),
-                    child: Row(
+
+        // 2. MINI PLAYER DE PRÉ-VISUALIZAÇÃO (CLIQUE NOVAMENTE PARA TELA CHEIA)
+        AnimatedSize(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+          child: (activeItem != null &&
+                  !isMiniPipFloating &&
+                  !isKeyboardOpen &&
+                  !isSeriesView)
+              ? GestureDetector(
+                  onTap: () => onOpenFullScreen(activeItem!),
+                  child: AspectRatio(
+                    aspectRatio: 16 / 9,
+                    child: Stack(
+                      fit: StackFit.expand,
                       children: [
-                        const Icon(Icons.circle,
-                            color: Colors.redAccent, size: 8),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            activeItem!.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                fontSize: 12, fontWeight: FontWeight.bold),
-                          ),
+                        Container(
+                          color: Colors.black,
+                          child: miniVideoWidget,
                         ),
-                        const SizedBox(width: 8),
-                        InkWell(
-                          onTap: onEnableMiniPip,
-                          child: Container(
-                            padding: const EdgeInsets.all(6),
-                            decoration: BoxDecoration(
-                              color: Colors.white12,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Icon(
-                                Icons.picture_in_picture_alt_rounded,
-                                color: Color(0xFF00E5FF),
-                                size: 18),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        InkWell(
-                          onTap: () => onOpenFullScreen(activeItem!),
+                        Positioned(
+                          bottom: 0,
+                          left: 0,
+                          right: 0,
                           child: Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF00E5FF),
-                              borderRadius: BorderRadius.circular(8),
+                                horizontal: 12, vertical: 8),
+                            decoration: const BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.bottomCenter,
+                                end: Alignment.topCenter,
+                                colors: [Colors.black87, Colors.transparent],
+                              ),
                             ),
-                            child: const Row(
-                              mainAxisSize: MainAxisSize.min,
+                            child: Row(
                               children: [
-                                Icon(Icons.fullscreen_rounded,
-                                    color: Colors.black, size: 18),
-                                SizedBox(width: 4),
-                                Text(
-                                  'Tela Cheia',
-                                  style: TextStyle(
-                                    color: Colors.black,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.bold,
+                                const Icon(Icons.circle,
+                                    color: Colors.redAccent, size: 8),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    '${activeItem!.name} (Toque p/ Tela Cheia)',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                InkWell(
+                                  onTap: onEnableMiniPip,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(6),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white12,
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: const Icon(
+                                        Icons.picture_in_picture_alt_rounded,
+                                        color: Color(0xFF00E5FF),
+                                        size: 18),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                InkWell(
+                                  onTap: () => onOpenFullScreen(activeItem!),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF00E5FF),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.fullscreen_rounded,
+                                            color: Colors.black, size: 18),
+                                        SizedBox(width: 4),
+                                        Text(
+                                          'Tela Cheia',
+                                          style: TextStyle(
+                                            color: Colors.black,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
                               ],
@@ -559,10 +585,11 @@ class MobileDashboardView extends StatelessWidget {
                       ],
                     ),
                   ),
-                ),
-              ],
-            ),
-          ),
+                )
+              : const SizedBox.shrink(),
+        ),
+
+        // 3. BUSCA E FILTRO DE GÊNEROS / CATEGORIAS
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
           child: Row(
@@ -579,7 +606,7 @@ class MobileDashboardView extends StatelessWidget {
                     controller: searchController,
                     onChanged: onSearchChanged,
                     decoration: InputDecoration(
-                      hintText: 'Buscar em $sectionTitle...',
+                      hintText: 'Pesquisar em $sectionTitle...',
                       hintStyle:
                           const TextStyle(fontSize: 13, color: Colors.white38),
                       prefixIcon: const Icon(Icons.search,
@@ -612,11 +639,11 @@ class MobileDashboardView extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.filter_list_rounded,
-                          color: Color(0xFF00E5FF), size: 18),
+                      const Icon(Icons.category_outlined,
+                          color: Color(0xFF00E5FF), size: 17),
                       const SizedBox(width: 6),
                       Text(
-                        'Categorias (${sectionCategories.length})',
+                        'Gêneros (${sectionCategories.length})',
                         style: const TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.bold,
@@ -630,6 +657,8 @@ class MobileDashboardView extends StatelessWidget {
             ],
           ),
         ),
+
+        // 4. BARRA DESLIZANTE DE GÊNEROS ESTILO STREAMING
         SizedBox(
           height: 38,
           child: ListView.builder(
@@ -660,87 +689,189 @@ class MobileDashboardView extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 6),
-        Expanded(
-          child: displayedItems.isEmpty
-              ? const Center(
-                  child: Text('Nenhum conteúdo encontrado nesta categoria.',
-                      style: TextStyle(color: Colors.white54, fontSize: 13)),
-                )
-              : ListView.builder(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  itemCount: displayedItems.length,
-                  itemBuilder: (context, index) {
-                    final item = displayedItems[index];
-                    final isPlaying = activeItem?.id == item.id;
-                    final isFav = favoriteIds.contains(item.id);
 
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      decoration: BoxDecoration(
-                        color: isPlaying
-                            ? const Color(0xFF172238)
-                            : const Color(0xFF12151F),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: isPlaying
-                              ? const Color(0xFF00E5FF)
-                              : Colors.white.withOpacity(0.05),
-                        ),
-                      ),
-                      child: ListTile(
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 2),
-                        onTap: () => onStartPreview(item),
-                        leading: buildChannelLogo(item.logo, size: 44),
-                        title: Text(
-                          item.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 13, fontWeight: FontWeight.bold),
-                        ),
-                        subtitle: Row(
-                          children: [
-                            buildQualityBadge(item.qualityTag),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                item.group,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    fontSize: 11, color: Colors.white54),
-                              ),
-                            ),
-                          ],
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: Icon(
-                                isFav
-                                    ? Icons.star_rounded
-                                    : Icons.star_border_rounded,
-                                color: isFav ? Colors.amber : Colors.white30,
-                                size: 20,
-                              ),
-                              onPressed: () => onToggleFavorite(item),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.fullscreen_rounded,
-                                  color: Color(0xFF00E5FF), size: 22),
-                              onPressed: () => onOpenFullScreen(item),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
+        // 5. CONTEÚDO ANIMADO (PÔSTERES DE CINEMA P/ FILMES E SÉRIES OU LISTA DE TV)
+        Expanded(
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 240),
+            child: isSeriesView
+                ? _buildSeriesPosterGrid()
+                : isMovieView
+                    ? _buildMoviesPosterGrid()
+                    : _buildLiveChannelsList(),
+          ),
         ),
       ],
+    );
+  }
+
+  // GRADE DE SÉRIES AGRUPADAS POR CAPA (CADA SÉRIE ABRE SUAS TEMPORADAS E EPISÓDIOS)
+  Widget _buildSeriesPosterGrid() {
+    if (displayedSeries.isEmpty) {
+      return const Center(
+        key: ValueKey('empty_series'),
+        child: Text('Nenhuma série encontrada neste gênero.',
+            style: TextStyle(color: Colors.white54, fontSize: 13)),
+      );
+    }
+
+    return GridView.builder(
+      key: ValueKey('series_grid_$selectedCategory'),
+      padding: const EdgeInsets.all(12),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        childAspectRatio: 0.64,
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
+      ),
+      itemCount: displayedSeries.length,
+      itemBuilder: (context, index) {
+        final series = displayedSeries[index];
+        return GestureDetector(
+          onTap: () => onSelectSeriesGroup(series),
+          child: buildStreamingPosterCard(
+            title: series.title,
+            subtitle:
+                '${series.totalSeasons} Temp • ${series.totalEpisodes} Eps',
+            logoUrl: series.logo,
+            badgeText: series.qualityTag,
+            onTap: () => onSelectSeriesGroup(series),
+          ),
+        );
+      },
+    );
+  }
+
+  // GRADE DE FILMES COM PÔSTERES VERTICAIS ESTILO STREAMING
+  Widget _buildMoviesPosterGrid() {
+    if (displayedItems.isEmpty) {
+      return const Center(
+        key: ValueKey('empty_movies'),
+        child: Text('Nenhum filme encontrado neste gênero.',
+            style: TextStyle(color: Colors.white54, fontSize: 13)),
+      );
+    }
+
+    return GridView.builder(
+      key: ValueKey('movies_grid_$selectedCategory'),
+      padding: const EdgeInsets.all(12),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        childAspectRatio: 0.64,
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
+      ),
+      itemCount: displayedItems.length,
+      itemBuilder: (context, index) {
+        final movie = displayedItems[index];
+        final isPlaying = activeItem?.id == movie.id;
+        final isFav = favoriteIds.contains(movie.id);
+
+        return GestureDetector(
+          onTap: () => onStartPreview(movie),
+          child: buildStreamingPosterCard(
+            title: movie.name,
+            subtitle: isPlaying ? '▶ Toque p/ Tela Cheia' : movie.group,
+            logoUrl: movie.logo,
+            badgeText: movie.qualityTag,
+            isPlaying: isPlaying,
+            isFavorite: isFav,
+            onFavoriteTap: () => onToggleFavorite(movie),
+            onTap: () => onStartPreview(movie),
+          ),
+        );
+      },
+    );
+  }
+
+  // LISTA DE CANAIS DE TV AO VIVO (1º TOQUE = PREVIEW, 2º TOQUE = TELA CHEIA)
+  Widget _buildLiveChannelsList() {
+    if (displayedItems.isEmpty) {
+      return const Center(
+        key: ValueKey('empty_live'),
+        child: Text('Nenhum canal encontrado nesta categoria.',
+            style: TextStyle(color: Colors.white54, fontSize: 13)),
+      );
+    }
+
+    return ListView.builder(
+      key: ValueKey('live_list_$selectedCategory'),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      itemCount: displayedItems.length,
+      itemBuilder: (context, index) {
+        final item = displayedItems[index];
+        final isPlaying = activeItem?.id == item.id;
+        final isFav = favoriteIds.contains(item.id);
+
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          margin: const EdgeInsets.only(bottom: 8),
+          decoration: BoxDecoration(
+            color: isPlaying
+                ? const Color(0xFF172238)
+                : const Color(0xFF12151F),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isPlaying
+                  ? const Color(0xFF00E5FF)
+                  : Colors.white.withOpacity(0.05),
+              width: isPlaying ? 1.5 : 1.0,
+            ),
+          ),
+          child: ListTile(
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+            onTap: () => onStartPreview(item),
+            leading: buildChannelLogo(item.logo, size: 44),
+            title: Text(
+              item.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style:
+                  const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+            ),
+            subtitle: Row(
+              children: [
+                buildQualityBadge(item.qualityTag),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    isPlaying
+                        ? 'Reproduzindo • Toque novamente p/ Tela Cheia'
+                        : item.group,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isPlaying
+                          ? const Color(0xFF00E5FF)
+                          : Colors.white54,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: Icon(
+                    isFav ? Icons.star_rounded : Icons.star_border_rounded,
+                    color: isFav ? Colors.amber : Colors.white30,
+                    size: 20,
+                  ),
+                  onPressed: () => onToggleFavorite(item),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.fullscreen_rounded,
+                      color: Color(0xFF00E5FF), size: 22),
+                  onPressed: () => onOpenFullScreen(item),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
