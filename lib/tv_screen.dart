@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'core.dart';
 
-class TVDashboardView extends StatelessWidget {
+class TVDashboardView extends StatefulWidget {
   final bool isSideMenuOpen;
   final VoidCallback onOpenSideMenu;
   final VoidCallback onCloseSideMenu;
@@ -14,12 +14,15 @@ class TVDashboardView extends StatelessWidget {
   final int liveCount;
   final int movieCount;
   final int seriesCount;
+  final int continueWatchingCount;
   final int favoritesCount;
   final int recentsCount;
   final List<StreamItem> displayedItems;
   final List<SeriesGroup> displayedSeries;
+  final Map<String, VodProgressEntry> vodProgressMap;
   final Set<String> favoriteIds;
   final StreamItem? activeItem;
+  final EpgProgramInfo? activeEpg;
   final List<StreamItem> activeQualityVariants;
   final Widget miniVideoWidget;
   final TextEditingController searchController;
@@ -51,12 +54,15 @@ class TVDashboardView extends StatelessWidget {
     required this.liveCount,
     required this.movieCount,
     required this.seriesCount,
+    required this.continueWatchingCount,
     required this.favoritesCount,
     required this.recentsCount,
     required this.displayedItems,
     required this.displayedSeries,
+    required this.vodProgressMap,
     required this.favoriteIds,
     required this.activeItem,
+    required this.activeEpg,
     required this.activeQualityVariants,
     required this.miniVideoWidget,
     required this.searchController,
@@ -76,30 +82,66 @@ class TVDashboardView extends StatelessWidget {
   });
 
   @override
+  State<TVDashboardView> createState() => _TVDashboardViewState();
+}
+
+class _TVDashboardViewState extends State<TVDashboardView> {
+  final FocusNode _activeSideMenuFocusNode = FocusNode();
+  final FocusNode _selectedCategoryFocusNode = FocusNode();
+
+  @override
+  void dispose() {
+    _activeSideMenuFocusNode.dispose();
+    _selectedCategoryFocusNode.dispose();
+    super.dispose();
+  }
+
+  /// Abre o menu lateral (se estiver fechado) e move a seleção diretamente para ele!
+  void _focusSideMenuNow() {
+    if (!widget.isSideMenuOpen) {
+      widget.onOpenSideMenu();
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _activeSideMenuFocusNode.requestFocus();
+      }
+    });
+  }
+
+  void _focusSelectedCategoryNow() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _selectedCategoryFocusNode.requestFocus();
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final isSeriesView = activeSection == MainSection.series;
-    final isMovieView = activeSection == MainSection.movie;
+    final isSeriesView = widget.activeSection == MainSection.series;
+    final isMovieView = widget.activeSection == MainSection.movie ||
+        widget.activeSection == MainSection.continueWatching;
     final countText = isSeriesView
-        ? '${displayedSeries.length} séries'
-        : '${displayedItems.length} itens';
+        ? '${widget.displayedSeries.length} séries'
+        : '${widget.displayedItems.length} itens';
 
     return Row(
       children: [
-        // 1. MENU LATERAL COM OCULTAÇÃO AUTOMÁTICA + GATILHO DE BORDA ESQUERDA
+        // 1. MENU LATERAL COM AUTO-OCULTAÇÃO E FOCO DIRETO PELA SETA ESQUERDA
         AnimatedContainer(
-          duration: const Duration(milliseconds: 240),
+          duration: const Duration(milliseconds: 220),
           curve: Curves.easeOutCubic,
-          width: isSideMenuOpen ? 215 : 18,
+          width: widget.isSideMenuOpen ? 215 : 18,
           decoration: const BoxDecoration(
             color: Color(0xFF0A0C12),
             border: Border(right: BorderSide(color: Colors.white10)),
           ),
-          child: isSideMenuOpen
+          child: widget.isSideMenuOpen
               ? _buildExpandedSideMenu()
               : _buildCollapsedEdgeSensor(),
         ),
 
-        // 2. COLUNA DE GÊNEROS / CATEGORIAS (SETA ESQUERDA REABRE O MENU LATERAL)
+        // 2. COLUNA DE GÊNEROS / CATEGORIAS (APERTAR ESQUERDA SELECIONA O MENU LATERAL!)
         Container(
           width: 215,
           decoration: const BoxDecoration(
@@ -113,19 +155,19 @@ class TVDashboardView extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
                 child: Row(
                   children: [
-                    if (!isSideMenuOpen)
+                    if (!widget.isSideMenuOpen)
                       Padding(
                         padding: const EdgeInsets.only(right: 6),
                         child: TVIconButton(
                           icon: Icons.menu_rounded,
                           color: const Color(0xFF00E5FF),
                           size: 18,
-                          onPressed: onOpenSideMenu,
+                          onPressed: _focusSideMenuNow,
                         ),
                       ),
                     Expanded(
                       child: Text(
-                        'GÊNEROS (${sectionCategories.length})',
+                        'GÊNEROS (${widget.sectionCategories.length})',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -142,19 +184,20 @@ class TVDashboardView extends StatelessWidget {
               Expanded(
                 child: ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 8),
-                  itemCount: sectionCategories.length,
+                  itemCount: widget.sectionCategories.length,
                   itemBuilder: (context, index) {
-                    final cat = sectionCategories[index];
-                    final count = categoryCounts[cat] ?? 0;
-                    final isSelected = cat == selectedCategory;
+                    final cat = widget.sectionCategories[index];
+                    final count = widget.categoryCounts[cat] ?? 0;
+                    final isSelected = cat == widget.selectedCategory;
 
                     return TVFocusableItem(
-                      autofocus: !isSideMenuOpen && isSelected,
-                      // Ir para a esquerda no controle remoto reabre o menu lateral!
-                      onMoveLeft: onOpenSideMenu,
-                      onSelect: () => onSelectCategory(cat),
+                      focusNode: isSelected ? _selectedCategoryFocusNode : null,
+                      autofocus: !widget.isSideMenuOpen && isSelected,
+                      // Quando aperta para a esquerda, a seleção vai direto para o Menu Lateral
+                      onMoveLeft: _focusSideMenuNow,
+                      onSelect: () => widget.onSelectCategory(cat),
                       builder: (context, isFocused) => AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
+                        duration: const Duration(milliseconds: 140),
                         margin: const EdgeInsets.symmetric(vertical: 2),
                         padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 9),
@@ -209,11 +252,11 @@ class TVDashboardView extends StatelessWidget {
           ),
         ),
 
-        // 3. ÁREA CENTRAL DE CONTEÚDO + PRÉ-VISUALIZAÇÃO
+        // 3. ÁREA CENTRAL DE CONTEÚDO + PRÉ-VISUALIZAÇÃO CONTÍNUA COM EPG
         Expanded(
           child: Column(
             children: [
-              // Barra Superior (Título da Seção + Busca com Teclado Virtual de TV)
+              // Barra Superior com Pesquisa Integrada
               Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -231,7 +274,7 @@ class TVDashboardView extends StatelessWidget {
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(
-                        sectionTitle.toUpperCase(),
+                        widget.sectionTitle.toUpperCase(),
                         style: const TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w900,
@@ -244,17 +287,19 @@ class TVDashboardView extends StatelessWidget {
                     Expanded(
                       child: TVFocusableItem(
                         autoScroll: false,
-                        onMoveLeft: onOpenSideMenu,
+                        onMoveLeft: widget.isSideMenuOpen
+                            ? _focusSideMenuNow
+                            : _focusSelectedCategoryNow,
                         onSelect: () {
                           openTVVirtualKeyboard(
                             context: context,
-                            controller: searchController,
-                            title: 'Pesquisar em $sectionTitle',
-                            onChanged: onSearchChanged,
+                            controller: widget.searchController,
+                            title: 'Pesquisar em ${widget.sectionTitle}',
+                            onChanged: widget.onSearchChanged,
                           );
                         },
                         builder: (context, isFocused) => AnimatedContainer(
-                          duration: const Duration(milliseconds: 150),
+                          duration: const Duration(milliseconds: 140),
                           height: 38,
                           padding: const EdgeInsets.symmetric(horizontal: 12),
                           decoration: BoxDecoration(
@@ -274,17 +319,17 @@ class TVDashboardView extends StatelessWidget {
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Text(
-                                  searchQuery.isEmpty
-                                      ? 'Aperte OK para pesquisar em $sectionTitle...'
-                                      : 'Filtro ativo: "$searchQuery"',
+                                  widget.searchQuery.isEmpty
+                                      ? 'Aperte OK para pesquisar ao vivo em ${widget.sectionTitle}...'
+                                      : 'Filtro ativo: "${widget.searchQuery}"',
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     fontSize: 12,
-                                    color: searchQuery.isEmpty
+                                    color: widget.searchQuery.isEmpty
                                         ? Colors.white54
                                         : const Color(0xFF00E5FF),
-                                    fontWeight: searchQuery.isEmpty
+                                    fontWeight: widget.searchQuery.isEmpty
                                         ? FontWeight.normal
                                         : FontWeight.bold,
                                   ),
@@ -295,11 +340,11 @@ class TVDashboardView extends StatelessWidget {
                         ),
                       ),
                     ),
-                    if (searchQuery.isNotEmpty) ...[
+                    if (widget.searchQuery.isNotEmpty) ...[
                       const SizedBox(width: 8),
                       TVFocusableItem(
                         autoScroll: false,
-                        onSelect: onClearSearch,
+                        onSelect: widget.onClearSearch,
                         builder: (context, isFocused) => Container(
                           height: 38,
                           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -336,10 +381,10 @@ class TVDashboardView extends StatelessWidget {
               Expanded(
                 child: Row(
                   children: [
-                    // GRADE ANIMADA (SÉRIES POR CAPA, FILMES EM PÔSTER OU CANAIS AO VIVO)
+                    // GRADE CENTRAL ANIMADA
                     Expanded(
                       child: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 240),
+                        duration: const Duration(milliseconds: 220),
                         child: isSeriesView
                             ? _buildTVSeriesCatalogGrid()
                             : isMovieView
@@ -348,10 +393,10 @@ class TVDashboardView extends StatelessWidget {
                       ),
                     ),
 
-                    // PAINEL DIREITO DE PRÉ-VISUALIZAÇÃO PEQUENA (OCULTO EM SÉRIES PARA DAR MAIS ESPAÇO AO CATÁLOGO)
+                    // PAINEL DIREITO DE PRÉ-VISUALIZAÇÃO CONTÍNUA + GUIA EPG
                     if (!isSeriesView)
                       Container(
-                        width: 280,
+                        width: 290,
                         decoration: const BoxDecoration(
                           color: Color(0xFF0A0C12),
                           border:
@@ -367,7 +412,7 @@ class TVDashboardView extends StatelessWidget {
                                     color: Colors.redAccent, size: 12),
                                 SizedBox(width: 6),
                                 Text(
-                                  'PRÉ-VISUALIZAÇÃO',
+                                  'PRÉ-VISUALIZAÇÃO CONTÍNUA',
                                   style: TextStyle(
                                     fontSize: 10,
                                     fontWeight: FontWeight.bold,
@@ -384,43 +429,114 @@ class TVDashboardView extends StatelessWidget {
                                 borderRadius: BorderRadius.circular(12),
                                 child: Container(
                                   color: Colors.black,
-                                  child: miniVideoWidget,
+                                  child: widget.miniVideoWidget,
                                 ),
                               ),
                             ),
-                            const SizedBox(height: 12),
-                            if (activeItem != null) ...[
+                            const SizedBox(height: 10),
+                            if (widget.activeItem != null) ...[
                               Text(
-                                activeItem!.name,
-                                maxLines: 2,
+                                widget.activeItem!.name,
+                                maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
                                     fontSize: 14, fontWeight: FontWeight.bold),
                               ),
-                              const SizedBox(height: 4),
+                              const SizedBox(height: 2),
                               Text(
-                                activeItem!.group,
+                                widget.activeItem!.group,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
                                     fontSize: 11, color: Color(0xFF00E5FF)),
                               ),
-                              const SizedBox(height: 6),
-                              const Text(
-                                'Dica: Selecione o canal novamente na lista para abrir direto em Tela Cheia.',
-                                style: TextStyle(
-                                    fontSize: 10, color: Colors.white38),
-                              ),
-                              const SizedBox(height: 10),
-                              if (activeQualityVariants.length > 1)
+
+                              // BLOCO DE GUIA DE PROGRAMAÇÃO (EPG) NA TV
+                              if (widget.activeEpg != null &&
+                                  widget.activeItem!.type ==
+                                      ContentType.live) ...[
+                                const SizedBox(height: 8),
+                                Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF121622),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: Colors.white10),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 5, vertical: 1),
+                                            decoration: BoxDecoration(
+                                              color: Colors.redAccent,
+                                              borderRadius:
+                                                  BorderRadius.circular(4),
+                                            ),
+                                            child: const Text(
+                                              'AGORA',
+                                              style: TextStyle(
+                                                fontSize: 8,
+                                                fontWeight: FontWeight.w900,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Expanded(
+                                            child: Text(
+                                              widget.activeEpg!.nowTitle,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 4),
+                                      ClipRRect(
+                                        borderRadius: BorderRadius.circular(3),
+                                        child: LinearProgressIndicator(
+                                          value: widget.activeEpg!.progress,
+                                          minHeight: 3,
+                                          backgroundColor: Colors.white12,
+                                          color: const Color(0xFF00E5FF),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'A Seguir: ${widget.activeEpg!.nextTitle}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 10,
+                                          color: Colors.white60,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+
+                              const SizedBox(height: 8),
+                              if (widget.activeQualityVariants.length > 1)
                                 Wrap(
                                   spacing: 6,
                                   runSpacing: 6,
-                                  children: activeQualityVariants.map((v) {
-                                    final selected = v.id == activeItem!.id;
+                                  children:
+                                      widget.activeQualityVariants.map((v) {
+                                    final selected =
+                                        v.id == widget.activeItem!.id;
                                     return TVFocusableItem(
                                       autoScroll: false,
-                                      onSelect: () => onStartPreview(v),
+                                      onSelect: () => widget.onStartPreview(v),
                                       builder: (context, isFocused) =>
                                           Container(
                                         padding: const EdgeInsets.symmetric(
@@ -451,15 +567,16 @@ class TVDashboardView extends StatelessWidget {
                                     );
                                   }).toList(),
                                 ),
-                              const SizedBox(height: 12),
+                              const Spacer(),
                               SizedBox(
                                 width: double.infinity,
                                 child: TVFocusableItem(
                                   autoScroll: false,
-                                  onSelect: () => onOpenFullScreen(activeItem!),
+                                  onSelect: () => widget
+                                      .onOpenFullScreen(widget.activeItem!),
                                   builder: (context, isFocused) => Container(
                                     padding: const EdgeInsets.symmetric(
-                                        vertical: 11),
+                                        vertical: 10),
                                     decoration: BoxDecoration(
                                       gradient: const LinearGradient(
                                         colors: [
@@ -477,29 +594,30 @@ class TVDashboardView extends StatelessWidget {
                                     ),
                                     child: const Center(
                                       child: Text(
-                                        'ABRIR TELA CHEIA',
+                                        'EXPANDIR TELA CHEIA',
                                         style: TextStyle(
                                           color: Colors.black,
                                           fontWeight: FontWeight.w900,
-                                          fontSize: 12,
+                                          fontSize: 11,
                                         ),
                                       ),
                                     ),
                                   ),
                                 ),
                               ),
-                              const SizedBox(height: 8),
+                              const SizedBox(height: 6),
                               SizedBox(
                                 width: double.infinity,
                                 child: TVFocusableItem(
                                   autoScroll: false,
-                                  onSelect: () => onToggleFavorite(activeItem!),
+                                  onSelect: () => widget
+                                      .onToggleFavorite(widget.activeItem!),
                                   builder: (context, isFocused) {
-                                    final isFav =
-                                        favoriteIds.contains(activeItem!.id);
+                                    final isFav = widget.favoriteIds
+                                        .contains(widget.activeItem!.id);
                                     return Container(
                                       padding: const EdgeInsets.symmetric(
-                                          vertical: 9),
+                                          vertical: 8),
                                       decoration: BoxDecoration(
                                         color: const Color(0xFF151924),
                                         borderRadius: BorderRadius.circular(10),
@@ -535,19 +653,18 @@ class TVDashboardView extends StatelessWidget {
     );
   }
 
-  // FAIXA SENSORA NA BORDA ESQUERDA QUANDO O MENU ESTÁ OCULTO
   Widget _buildCollapsedEdgeSensor() {
     return TVFocusableItem(
       autoScroll: false,
-      onSelect: onOpenSideMenu,
+      onSelect: _focusSideMenuNow,
       builder: (context, isFocused) {
         if (isFocused) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            onOpenSideMenu();
+            _focusSideMenuNow();
           });
         }
         return GestureDetector(
-          onTap: onOpenSideMenu,
+          onTap: _focusSideMenuNow,
           child: Container(
             color: const Color(0xFF0A0C12),
             child: Center(
@@ -566,7 +683,6 @@ class TVDashboardView extends StatelessWidget {
     );
   }
 
-  // MENU LATERAL EXPANDIDO (OCULTA AUTOMATICAMENTE AO SELECIONAR UMA OPÇÃO)
   Widget _buildExpandedSideMenu() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -601,7 +717,7 @@ class TVDashboardView extends StatelessWidget {
                       ),
                     ),
                     Text(
-                      '$totalAllCount conteúdos',
+                      '${widget.totalAllCount} conteúdos',
                       style: const TextStyle(
                         fontSize: 10,
                         color: Color(0xFF00E5FF),
@@ -614,7 +730,7 @@ class TVDashboardView extends StatelessWidget {
               TVIconButton(
                 icon: Icons.chevron_left_rounded,
                 size: 18,
-                onPressed: onCloseSideMenu,
+                onPressed: widget.onCloseSideMenu,
               ),
             ],
           ),
@@ -626,73 +742,95 @@ class TVDashboardView extends StatelessWidget {
             children: [
               _buildTVSideNavButton(
                 label: 'TV ao Vivo',
-                count: liveCount,
+                count: widget.liveCount,
                 icon: Icons.live_tv_rounded,
-                selected: activeSection == MainSection.live,
-                autofocus: activeSection == MainSection.live,
-                onSelect: () => onSelectSection(MainSection.live),
+                selected: widget.activeSection == MainSection.live,
+                focusNode: widget.activeSection == MainSection.live
+                    ? _activeSideMenuFocusNode
+                    : null,
+                onSelect: () => widget.onSelectSection(MainSection.live),
               ),
               _buildTVSideNavButton(
                 label: 'Filmes',
-                count: movieCount,
+                count: widget.movieCount,
                 icon: Icons.movie_creation_outlined,
-                selected: activeSection == MainSection.movie,
-                autofocus: activeSection == MainSection.movie,
-                onSelect: () => onSelectSection(MainSection.movie),
+                selected: widget.activeSection == MainSection.movie,
+                focusNode: widget.activeSection == MainSection.movie
+                    ? _activeSideMenuFocusNode
+                    : null,
+                onSelect: () => widget.onSelectSection(MainSection.movie),
               ),
               _buildTVSideNavButton(
                 label: 'Séries',
-                count: seriesCount,
+                count: widget.seriesCount,
                 icon: Icons.video_library_outlined,
-                selected: activeSection == MainSection.series,
-                autofocus: activeSection == MainSection.series,
-                onSelect: () => onSelectSection(MainSection.series),
+                selected: widget.activeSection == MainSection.series,
+                focusNode: widget.activeSection == MainSection.series
+                    ? _activeSideMenuFocusNode
+                    : null,
+                onSelect: () => widget.onSelectSection(MainSection.series),
               ),
-              const Divider(color: Colors.white10, height: 18),
+              const Divider(color: Colors.white10, height: 16),
+              _buildTVSideNavButton(
+                label: 'Continuar',
+                count: widget.continueWatchingCount,
+                icon: Icons.play_circle_outline_rounded,
+                selected: widget.activeSection == MainSection.continueWatching,
+                focusNode:
+                    widget.activeSection == MainSection.continueWatching
+                        ? _activeSideMenuFocusNode
+                        : null,
+                onSelect: () =>
+                    widget.onSelectSection(MainSection.continueWatching),
+              ),
               _buildTVSideNavButton(
                 label: 'Favoritos',
-                count: favoritesCount,
+                count: widget.favoritesCount,
                 icon: Icons.star_rounded,
-                selected: activeSection == MainSection.favorites,
-                autofocus: activeSection == MainSection.favorites,
-                onSelect: () => onSelectSection(MainSection.favorites),
+                selected: widget.activeSection == MainSection.favorites,
+                focusNode: widget.activeSection == MainSection.favorites
+                    ? _activeSideMenuFocusNode
+                    : null,
+                onSelect: () => widget.onSelectSection(MainSection.favorites),
               ),
               _buildTVSideNavButton(
                 label: 'Recentes',
-                count: recentsCount,
+                count: widget.recentsCount,
                 icon: Icons.history_rounded,
-                selected: activeSection == MainSection.recents,
-                autofocus: activeSection == MainSection.recents,
-                onSelect: () => onSelectSection(MainSection.recents),
+                selected: widget.activeSection == MainSection.recents,
+                focusNode: widget.activeSection == MainSection.recents
+                    ? _activeSideMenuFocusNode
+                    : null,
+                onSelect: () => widget.onSelectSection(MainSection.recents),
               ),
-              const Divider(color: Colors.white10, height: 18),
+              const Divider(color: Colors.white10, height: 16),
               _buildTVSideActionButton(
                 label: 'Velocidade',
                 icon: Icons.speed_rounded,
                 color: const Color(0xFF00E5FF),
                 onSelect: () {
-                  onCloseSideMenu();
-                  onOpenSpeedTest();
+                  widget.onCloseSideMenu();
+                  widget.onOpenSpeedTest();
                 },
               ),
               _buildTVSideActionButton(
                 label: 'Atualizar Lista',
                 icon: Icons.refresh_rounded,
                 onSelect: () {
-                  onCloseSideMenu();
-                  onRefreshPlaylist();
+                  widget.onCloseSideMenu();
+                  widget.onRefreshPlaylist();
                 },
               ),
               _buildTVSideActionButton(
                 label: 'Modo Celular',
                 icon: Icons.smartphone_rounded,
-                onSelect: onSwitchToMobileMode,
+                onSelect: widget.onSwitchToMobileMode,
               ),
               _buildTVSideActionButton(
                 label: 'Trocar Conta',
                 icon: Icons.logout_rounded,
                 color: Colors.redAccent,
-                onSelect: onLogout,
+                onSelect: widget.onLogout,
               ),
             ],
           ),
@@ -701,9 +839,8 @@ class TVDashboardView extends StatelessWidget {
     );
   }
 
-  // CATÁLOGO DE SÉRIES NA TV (PÔSTERES 2:3 QUE ABREM AS TEMPORADAS E EPISÓDIOS)
   Widget _buildTVSeriesCatalogGrid() {
-    if (displayedSeries.isEmpty) {
+    if (widget.displayedSeries.isEmpty) {
       return const Center(
         key: ValueKey('tv_empty_series'),
         child: Text('Nenhuma série encontrada neste gênero.',
@@ -712,7 +849,7 @@ class TVDashboardView extends StatelessWidget {
     }
 
     return GridView.builder(
-      key: ValueKey('tv_series_$selectedCategory'),
+      key: ValueKey('tv_series_${widget.selectedCategory}'),
       padding: const EdgeInsets.all(16),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 175,
@@ -720,11 +857,13 @@ class TVDashboardView extends StatelessWidget {
         crossAxisSpacing: 14,
         mainAxisSpacing: 14,
       ),
-      itemCount: displayedSeries.length,
+      itemCount: widget.displayedSeries.length,
       itemBuilder: (context, index) {
-        final series = displayedSeries[index];
+        final series = widget.displayedSeries[index];
         return TVFocusableItem(
-          onSelect: () => onSelectSeriesGroup(series),
+          onMoveLeft:
+              widget.isSideMenuOpen && index == 0 ? _focusSideMenuNow : null,
+          onSelect: () => widget.onSelectSeriesGroup(series),
           builder: (context, isFocused) => buildStreamingPosterCard(
             title: series.title,
             subtitle:
@@ -732,25 +871,25 @@ class TVDashboardView extends StatelessWidget {
             logoUrl: series.logo,
             badgeText: series.qualityTag,
             isFocused: isFocused,
-            onTap: () => onSelectSeriesGroup(series),
+            onTap: () => widget.onSelectSeriesGroup(series),
           ),
         );
       },
     );
   }
 
-  // CATÁLOGO DE FILMES NA TV (PÔSTERES 2:3 COM 1º CLIQUE PREVIEW E 2º TELA CHEIA)
   Widget _buildTVMoviesPosterGrid() {
-    if (displayedItems.isEmpty) {
+    if (widget.displayedItems.isEmpty) {
       return const Center(
         key: ValueKey('tv_empty_movies'),
-        child: Text('Nenhum filme encontrado neste gênero.',
+        child: Text('Nenhum conteúdo encontrado nesta seção.',
             style: TextStyle(color: Colors.white54)),
       );
     }
 
     return GridView.builder(
-      key: ValueKey('tv_movies_$selectedCategory'),
+      key: ValueKey(
+          'tv_movies_${widget.activeSection}_${widget.selectedCategory}'),
       padding: const EdgeInsets.all(14),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 165,
@@ -758,33 +897,40 @@ class TVDashboardView extends StatelessWidget {
         crossAxisSpacing: 12,
         mainAxisSpacing: 12,
       ),
-      itemCount: displayedItems.length,
+      itemCount: widget.displayedItems.length,
       itemBuilder: (context, index) {
-        final movie = displayedItems[index];
-        final isPlaying = activeItem?.id == movie.id;
-        final isFav = favoriteIds.contains(movie.id);
+        final movie = widget.displayedItems[index];
+        final isPlaying = widget.activeItem?.id == movie.id;
+        final isFav = widget.favoriteIds.contains(movie.id);
+        final savedProg = widget.vodProgressMap[movie.id];
 
         return TVFocusableItem(
-          onSelect: () => onStartPreview(movie),
+          onMoveLeft:
+              widget.isSideMenuOpen && index == 0 ? _focusSideMenuNow : null,
+          onSelect: () => widget.onStartPreview(movie),
           builder: (context, isFocused) => buildStreamingPosterCard(
             title: movie.name,
-            subtitle: isPlaying ? '▶ OK p/ Tela Cheia' : movie.group,
+            subtitle: isPlaying
+                ? '▶ OK p/ Tela Cheia'
+                : savedProg != null
+                    ? savedProg.formattedRemaining
+                    : movie.group,
             logoUrl: movie.logo,
             badgeText: movie.qualityTag,
             isFocused: isFocused,
             isPlaying: isPlaying,
             isFavorite: isFav,
-            onFavoriteTap: () => onToggleFavorite(movie),
-            onTap: () => onStartPreview(movie),
+            progress: savedProg?.progress,
+            onFavoriteTap: () => widget.onToggleFavorite(movie),
+            onTap: () => widget.onStartPreview(movie),
           ),
         );
       },
     );
   }
 
-  // GRADE DE CANAIS AO VIVO NA TV (1º CLIQUE PREVIEW PEQUENO, 2º CLIQUE TELA CHEIA)
   Widget _buildTVLiveChannelsGrid() {
-    if (displayedItems.isEmpty) {
+    if (widget.displayedItems.isEmpty) {
       return const Center(
         key: ValueKey('tv_empty_live'),
         child: Text('Nenhum canal encontrado.',
@@ -793,7 +939,7 @@ class TVDashboardView extends StatelessWidget {
     }
 
     return GridView.builder(
-      key: ValueKey('tv_live_$selectedCategory'),
+      key: ValueKey('tv_live_${widget.selectedCategory}'),
       padding: const EdgeInsets.all(14),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 245,
@@ -801,14 +947,16 @@ class TVDashboardView extends StatelessWidget {
         crossAxisSpacing: 10,
         mainAxisSpacing: 10,
       ),
-      itemCount: displayedItems.length,
+      itemCount: widget.displayedItems.length,
       itemBuilder: (context, index) {
-        final item = displayedItems[index];
-        final isPlaying = activeItem?.id == item.id;
-        final isFav = favoriteIds.contains(item.id);
+        final item = widget.displayedItems[index];
+        final isPlaying = widget.activeItem?.id == item.id;
+        final isFav = widget.favoriteIds.contains(item.id);
 
         return TVFocusableItem(
-          onSelect: () => onStartPreview(item),
+          onMoveLeft:
+              widget.isSideMenuOpen && index == 0 ? _focusSideMenuNow : null,
+          onSelect: () => widget.onStartPreview(item),
           builder: (context, isFocused) => AnimatedScale(
             scale: isFocused ? 1.04 : 1.0,
             duration: const Duration(milliseconds: 130),
@@ -893,13 +1041,15 @@ class TVDashboardView extends StatelessWidget {
     required IconData icon,
     required bool selected,
     required VoidCallback onSelect,
-    bool autofocus = false,
+    FocusNode? focusNode,
   }) {
     return TVFocusableItem(
-      autofocus: autofocus,
+      focusNode: focusNode,
+      autofocus: selected,
+      onMoveRight: _focusSelectedCategoryNow,
       onSelect: onSelect,
       builder: (context, isFocused) => AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
+        duration: const Duration(milliseconds: 140),
         margin: const EdgeInsets.symmetric(vertical: 3),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
         decoration: BoxDecoration(
@@ -956,6 +1106,7 @@ class TVDashboardView extends StatelessWidget {
     Color color = Colors.white70,
   }) {
     return TVFocusableItem(
+      onMoveRight: _focusSelectedCategoryNow,
       onSelect: onSelect,
       builder: (context, isFocused) => Container(
         margin: const EdgeInsets.symmetric(vertical: 2),
