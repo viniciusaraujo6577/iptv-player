@@ -245,7 +245,7 @@ class EpgService {
 }
 
 // =============================================================================
-// MOTOR DE VÍDEO COMPARTILHADO (ZERO REINICIALIZAÇÃO AO ALTERNAR TELAS)
+// MOTOR DE VÍDEO COMPARTILHADO (COM SUPORTE A "ÚLTIMO CANAL / RECALL")
 // =============================================================================
 class SharedStreamEngine extends ChangeNotifier {
   static final SharedStreamEngine instance = SharedStreamEngine._internal();
@@ -253,6 +253,7 @@ class SharedStreamEngine extends ChangeNotifier {
 
   VideoPlayerController? controller;
   StreamItem? currentItem;
+  StreamItem? previousChannelItem; // Guarda o último canal para troca rápida (Recall)
   EpgProgramInfo? currentEpg;
 
   bool isReady = false;
@@ -272,6 +273,7 @@ class SharedStreamEngine extends ChangeNotifier {
   int _vodSaveTick = 0;
 
   void Function(VodProgressEntry entry)? onVodProgressSaved;
+  VoidCallback? onVodEpisodeEnded;
 
   void configureCredentials({
     required String dns,
@@ -307,6 +309,14 @@ class SharedStreamEngine extends ChangeNotifier {
     }
 
     _saveCurrentVodProgressImmediately();
+
+    // Registra o último canal ao vivo para o botão Recall
+    if (currentItem != null &&
+        currentItem!.id != item.id &&
+        currentItem!.type == ContentType.live &&
+        item.type == ContentType.live) {
+      previousChannelItem = currentItem;
+    }
 
     currentItem = item;
     isReady = false;
@@ -386,6 +396,15 @@ class SharedStreamEngine extends ChangeNotifier {
       if (ctrl == null || item == null || !isReady) return;
 
       final val = ctrl.value;
+
+      // Detecta fim do episódio em Séries para acionar o Próximo Episódio Automático
+      if (item.type == ContentType.series &&
+          val.duration.inSeconds > 60 &&
+          val.position.inSeconds >= val.duration.inSeconds - 2) {
+        onVodEpisodeEnded?.call();
+        return;
+      }
+
       if (!val.isPlaying) return;
 
       if (item.type != ContentType.live) {
@@ -447,6 +466,21 @@ class SharedStreamEngine extends ChangeNotifier {
     }
   }
 
+  /// Pausa apenas o áudio/vídeo em segundo plano sem destruir o buffer quando vai ao catálogo de séries
+  void pausePreviewSilently() {
+    if (controller != null && isReady && controller!.value.isPlaying) {
+      controller!.pause();
+      notifyListeners();
+    }
+  }
+
+  void resumePreviewSilently() {
+    if (controller != null && isReady && !controller!.value.isPlaying) {
+      controller!.play();
+      notifyListeners();
+    }
+  }
+
   void togglePlayPause() {
     if (controller == null || !isReady) return;
     if (controller!.value.isPlaying) {
@@ -480,6 +514,7 @@ class SharedStreamEngine extends ChangeNotifier {
     final old = controller;
     controller = null;
     currentItem = null;
+    previousChannelItem = null;
     currentEpg = null;
     isReady = false;
     hasError = false;
@@ -571,8 +606,8 @@ List<SeriesGroup> groupSeriesItems(List<StreamItem> items) {
 
 Route<T> createSmoothRoute<T>(Widget page) {
   return PageRouteBuilder<T>(
-    transitionDuration: const Duration(milliseconds: 240),
-    reverseTransitionDuration: const Duration(milliseconds: 200),
+    transitionDuration: const Duration(milliseconds: 220),
+    reverseTransitionDuration: const Duration(milliseconds: 180),
     pageBuilder: (context, animation, secondaryAnimation) => page,
     transitionsBuilder: (context, animation, secondaryAnimation, child) {
       final curved = CurvedAnimation(
@@ -591,20 +626,42 @@ Route<T> createSmoothRoute<T>(Widget page) {
 }
 
 // =============================================================================
-// ARMAZENAMENTO LOCAL (DISPOSITIVO, SESSÃO E PROGRESSO DE FILMES/SÉRIES)
+// ARMAZENAMENTO PERMANENTE REAL NO ANDROID + CACHE LOCAL DA LISTA M3U
 // =============================================================================
 class AppStorage {
-  static File get _deviceFile =>
-      File('${Directory.systemTemp.path}/unex_device_mode_v7.json');
-  static File get _sessionFile =>
-      File('${Directory.systemTemp.path}/unex_verified_session_v7.json');
-  static File get _vodProgressFile =>
-      File('${Directory.systemTemp.path}/unex_vod_progress_v7.json');
+  static Directory? _resolvedDir;
+
+  /// Usa o diretório permanente interno do app Android (não apaga ao reiniciar a TV/Celular)
+  static Future<Directory> _getPersistentDir() async {
+    if (_resolvedDir != null) return _resolvedDir!;
+    const androidPaths = [
+      '/data/user/0/com.exemplo.iptv_player/files',
+      '/data/data/com.exemplo.iptv_player/files',
+    ];
+    for (final p in androidPaths) {
+      try {
+        final d = Directory(p);
+        if (!await d.exists()) {
+          await d.create(recursive: true);
+        }
+        _resolvedDir = d;
+        return d;
+      } catch (_) {}
+    }
+    _resolvedDir = Directory.systemTemp;
+    return _resolvedDir!;
+  }
+
+  static Future<File> _file(String name) async {
+    final dir = await _getPersistentDir();
+    return File('${dir.path}/$name');
+  }
 
   static Future<DeviceMode?> loadDeviceMode() async {
     try {
-      if (await _deviceFile.exists()) {
-        final data = jsonDecode(await _deviceFile.readAsString());
+      final f = await _file('unex_device_mode_v8.json');
+      if (await f.exists()) {
+        final data = jsonDecode(await f.readAsString());
         if (data['mode'] == 'tv') return DeviceMode.tv;
         if (data['mode'] == 'mobile') return DeviceMode.mobile;
       }
@@ -614,7 +671,8 @@ class AppStorage {
 
   static Future<void> saveDeviceMode(DeviceMode mode) async {
     try {
-      await _deviceFile.writeAsString(
+      final f = await _file('unex_device_mode_v8.json');
+      await f.writeAsString(
         jsonEncode({'mode': mode == DeviceMode.tv ? 'tv' : 'mobile'}),
       );
     } catch (_) {}
@@ -622,9 +680,9 @@ class AppStorage {
 
   static Future<Map<String, dynamic>?> loadVerifiedSession() async {
     try {
-      if (await _sessionFile.exists()) {
-        final data =
-            jsonDecode(await _sessionFile.readAsString()) as Map<String, dynamic>;
+      final f = await _file('unex_verified_session_v8.json');
+      if (await f.exists()) {
+        final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
         if (data['verified'] == true) return data;
       }
     } catch (_) {}
@@ -633,24 +691,97 @@ class AppStorage {
 
   static Future<void> saveVerifiedSession(Map<String, dynamic> data) async {
     try {
+      final f = await _file('unex_verified_session_v8.json');
       data['verified'] = true;
-      await _sessionFile.writeAsString(jsonEncode(data));
+      await f.writeAsString(jsonEncode(data));
     } catch (_) {}
   }
 
   static Future<void> clearSession() async {
     try {
-      if (await _sessionFile.exists()) {
-        await _sessionFile.delete();
+      final f = await _file('unex_verified_session_v8.json');
+      if (await f.exists()) await f.delete();
+      final cacheFile = await _file('unex_playlist_cache_v8.m3u');
+      if (await cacheFile.exists()) await cacheFile.delete();
+    } catch (_) {}
+  }
+
+  // Cache local da lista M3U para abertura instantânea em 1 segundo
+  static Future<String?> loadPlaylistCache(String urlKey) async {
+    try {
+      final metaFile = await _file('unex_playlist_meta_v8.json');
+      final cacheFile = await _file('unex_playlist_cache_v8.m3u');
+      if (await metaFile.exists() && await cacheFile.exists()) {
+        final meta = jsonDecode(await metaFile.readAsString());
+        if (meta['url'] == urlKey) {
+          final content = await cacheFile.readAsString();
+          if (content.isNotEmpty) return content;
+        }
       }
+    } catch (_) {}
+    return null;
+  }
+
+  static Future<void> savePlaylistCache(String urlKey, String rawM3u) async {
+    try {
+      final metaFile = await _file('unex_playlist_meta_v8.json');
+      final cacheFile = await _file('unex_playlist_cache_v8.m3u');
+      await metaFile.writeAsString(jsonEncode({
+        'url': urlKey,
+        'savedAt': DateTime.now().millisecondsSinceEpoch,
+      }));
+      await cacheFile.writeAsString(rawM3u);
+    } catch (_) {}
+  }
+
+  // Persistência Permanente de Favoritos (Canais, Filmes e Séries)
+  static Future<Set<String>> loadFavorites() async {
+    try {
+      final f = await _file('unex_favorites_v8.json');
+      if (await f.exists()) {
+        final list = (jsonDecode(await f.readAsString()) as List)
+            .map((e) => e.toString())
+            .toSet();
+        return list;
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  static Future<void> saveFavorites(Set<String> ids) async {
+    try {
+      final f = await _file('unex_favorites_v8.json');
+      await f.writeAsString(jsonEncode(ids.toList()));
+    } catch (_) {}
+  }
+
+  // Persistência Permanente de Recentes
+  static Future<List<StreamItem>> loadRecents() async {
+    try {
+      final f = await _file('unex_recents_v8.json');
+      if (await f.exists()) {
+        final list = jsonDecode(await f.readAsString()) as List;
+        return list
+            .map((e) => StreamItem.fromJson((e as Map).cast<String, dynamic>()))
+            .toList();
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  static Future<void> saveRecents(List<StreamItem> items) async {
+    try {
+      final f = await _file('unex_recents_v8.json');
+      final data = items.take(40).map((e) => e.toJson()).toList();
+      await f.writeAsString(jsonEncode(data));
     } catch (_) {}
   }
 
   static Future<Map<String, VodProgressEntry>> loadVodProgressMap() async {
     try {
-      if (await _vodProgressFile.exists()) {
-        final raw = jsonDecode(await _vodProgressFile.readAsString())
-            as Map<String, dynamic>;
+      final f = await _file('unex_vod_progress_v8.json');
+      if (await f.exists()) {
+        final raw = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
         final Map<String, VodProgressEntry> map = {};
         raw.forEach((key, value) {
           if (value is Map) {
@@ -666,6 +797,7 @@ class AppStorage {
 
   static Future<void> saveVodProgressEntry(VodProgressEntry entry) async {
     try {
+      final f = await _file('unex_vod_progress_v8.json');
       final map = await loadVodProgressMap();
       if (entry.progress >= 0.96) {
         map.remove(entry.item.id);
@@ -674,7 +806,7 @@ class AppStorage {
       }
       final serialized =
           map.map((key, value) => MapEntry(key, value.toJson()));
-      await _vodProgressFile.writeAsString(jsonEncode(serialized));
+      await f.writeAsString(jsonEncode(serialized));
     } catch (_) {}
   }
 }
@@ -858,18 +990,21 @@ Future<Duration?> showVodResumePrompt({
 }
 
 // =============================================================================
-// MODAL STREAMING DE TEMPORADAS E EPISÓDIOS DA SÉRIE
+// MODAL STREAMING DE TEMPORADAS E EPISÓDIOS DA SÉRIE (COM BOTÃO DE FAVORITAR SÉRIE)
 // =============================================================================
 Future<void> openSeriesDetailsModal({
   required BuildContext context,
   required SeriesGroup series,
   required Map<String, VodProgressEntry> vodProgressMap,
+  required bool isSeriesFavorite,
+  required VoidCallback onToggleSeriesFavorite,
   required void Function(StreamItem episode, List<StreamItem> fullSeriesPlaylist)
       onPlayEpisode,
 }) async {
   final seasonKeys = series.seasons.keys.toList()..sort();
   int selectedSeason = seasonKeys.isNotEmpty ? seasonKeys.first : 1;
   final allEpisodesPlaylist = series.allEpisodesFlat;
+  bool localFav = isSeriesFavorite;
 
   await showDialog(
     context: context,
@@ -971,56 +1106,109 @@ Future<void> openSeriesDetailsModal({
                                 ),
                               ),
                               const SizedBox(height: 14),
-                              if (currentEpisodes.isNotEmpty)
-                                TVFocusableItem(
-                                  autofocus: true,
-                                  autoScroll: false,
-                                  onSelect: () {
-                                    Navigator.pop(ctx);
-                                    onPlayEpisode(currentEpisodes.first,
-                                        allEpisodesPlaylist);
-                                  },
-                                  builder: (context, isFocused) =>
-                                      AnimatedScale(
-                                    scale: isFocused ? 1.05 : 1.0,
-                                    duration: const Duration(milliseconds: 140),
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 18, vertical: 10),
-                                      decoration: BoxDecoration(
-                                        gradient: const LinearGradient(
-                                          colors: [
-                                            Color(0xFF00E5FF),
-                                            Color(0xFF2979FF)
-                                          ],
+                              Wrap(
+                                spacing: 10,
+                                runSpacing: 8,
+                                children: [
+                                  if (currentEpisodes.isNotEmpty)
+                                    TVFocusableItem(
+                                      autofocus: true,
+                                      autoScroll: false,
+                                      onSelect: () {
+                                        Navigator.pop(ctx);
+                                        onPlayEpisode(currentEpisodes.first,
+                                            allEpisodesPlaylist);
+                                      },
+                                      builder: (context, isFocused) =>
+                                          AnimatedScale(
+                                        scale: isFocused ? 1.05 : 1.0,
+                                        duration:
+                                            const Duration(milliseconds: 140),
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 18, vertical: 10),
+                                          decoration: BoxDecoration(
+                                            gradient: const LinearGradient(
+                                              colors: [
+                                                Color(0xFF00E5FF),
+                                                Color(0xFF2979FF)
+                                              ],
+                                            ),
+                                            borderRadius:
+                                                BorderRadius.circular(10),
+                                            border: Border.all(
+                                              color: isFocused
+                                                  ? Colors.white
+                                                  : Colors.transparent,
+                                              width: 2,
+                                            ),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const Icon(
+                                                  Icons.play_arrow_rounded,
+                                                  color: Colors.black,
+                                                  size: 20),
+                                              const SizedBox(width: 6),
+                                              Text(
+                                                'Assistir T$selectedSeason:E${currentEpisodes.first.episodeNumber}',
+                                                style: const TextStyle(
+                                                  color: Colors.black,
+                                                  fontWeight: FontWeight.w900,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
                                         ),
+                                      ),
+                                    ),
+                                  TVFocusableItem(
+                                    autoScroll: false,
+                                    onSelect: () {
+                                      setModalState(() => localFav = !localFav);
+                                      onToggleSeriesFavorite();
+                                    },
+                                    builder: (context, isFocused) => Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 14, vertical: 10),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF151924),
                                         borderRadius: BorderRadius.circular(10),
                                         border: Border.all(
                                           color: isFocused
-                                              ? Colors.white
-                                              : Colors.transparent,
-                                          width: 2,
+                                              ? const Color(0xFF00E5FF)
+                                              : Colors.white24,
+                                          width: isFocused ? 2 : 1,
                                         ),
                                       ),
                                       child: Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
-                                          const Icon(Icons.play_arrow_rounded,
-                                              color: Colors.black, size: 20),
+                                          Icon(
+                                            localFav
+                                                ? Icons.star_rounded
+                                                : Icons.star_border_rounded,
+                                            color: localFav
+                                                ? Colors.amber
+                                                : Colors.white,
+                                            size: 18,
+                                          ),
                                           const SizedBox(width: 6),
                                           Text(
-                                            'Assistir T$selectedSeason:E${currentEpisodes.first.episodeNumber}',
-                                            style: const TextStyle(
-                                              color: Colors.black,
-                                              fontWeight: FontWeight.w900,
-                                              fontSize: 12,
-                                            ),
+                                            localFav
+                                                ? 'Série Favorita'
+                                                : 'Favoritar Série',
+                                            style:
+                                                const TextStyle(fontSize: 12),
                                           ),
                                         ],
                                       ),
                                     ),
                                   ),
-                                ),
+                                ],
+                              ),
                             ],
                           ),
                         ),
@@ -1230,7 +1418,7 @@ Future<void> openSeriesDetailsModal({
 }
 
 // =============================================================================
-// TECLADO VIRTUAL MINIMALISTA ESTILO YOUTUBE TV (QWERTY + 2 ATALHOS INTERNOS + BOTÃO CONTINUAR EXTERNO)
+// TECLADO VIRTUAL MINIMALISTA ESTILO YOUTUBE TV
 // =============================================================================
 enum _TVKeyboardView { qwerty, symbols, web }
 
@@ -1261,7 +1449,6 @@ Future<void> openTVVirtualKeyboard({
 
   await showDialog(
     context: context,
-    // Zero escurecimento para não atrapalhar a visualização dos conteúdos ao fundo!
     barrierColor: Colors.transparent,
     barrierDismissible: true,
     builder: (ctx) {
@@ -1312,7 +1499,6 @@ Future<void> openTVVirtualKeyboard({
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      // 1. BLOCO COMPACTO DO TECLADO (MÍNIMO DE ESPAÇO NA TELA)
                       Container(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 8),
@@ -1334,7 +1520,6 @@ Future<void> openTVVirtualKeyboard({
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            // Visor micro embutido para acompanhar o texto sem ocupar altura extra
                             Container(
                               width: isNumericOnly ? 280 : 450,
                               margin: const EdgeInsets.only(bottom: 6),
@@ -1374,8 +1559,6 @@ Future<void> openTVVirtualKeyboard({
                                 ],
                               ),
                             ),
-
-                            // GRADE DE TECLAS (NUMÉRICO, SÍMBOLOS, ATALHOS WEB OU QWERTY)
                             if (isNumericOnly) ...[
                               Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -1457,8 +1640,6 @@ Future<void> openTVVirtualKeyboard({
                                   ),
                                 ),
                             ] else ...[
-                              // MODO PADRÃO QWERTY MINIMALISTA (3 LINHAS SUPERIORES)
-                              // Linha 1: Números + Hífen e Ponto
                               Padding(
                                 padding: const EdgeInsets.only(bottom: 3),
                                 child: Row(
@@ -1486,7 +1667,6 @@ Future<void> openTVVirtualKeyboard({
                                   ],
                                 ),
                               ),
-                              // Linha 2: Q W E R T Y U I O P / :
                               Padding(
                                 padding: const EdgeInsets.only(bottom: 3),
                                 child: Row(
@@ -1523,7 +1703,6 @@ Future<void> openTVVirtualKeyboard({
                                   ],
                                 ),
                               ),
-                              // Linha 3: Shift + A S D F G H J K L _ + Apagar
                               Padding(
                                 padding: const EdgeInsets.only(bottom: 3),
                                 child: Row(
@@ -1573,13 +1752,10 @@ Future<void> openTVVirtualKeyboard({
                                 ),
                               ),
                             ],
-
-                            // LINHA 4 INTEGRADA (CONTÉM OS 2 BOTÕES DISCRETOS: #+= E 🌐 + Z-M + ESPAÇO)
                             if (!isNumericOnly)
                               Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  // Botão Discreto 1: Símbolos e Caracteres Especiais
                                   _buildMinimalKey(
                                     label: activeView == _TVKeyboardView.symbols
                                         ? 'ABC'
@@ -1599,7 +1775,6 @@ Future<void> openTVVirtualKeyboard({
                                               : _TVKeyboardView.symbols;
                                     }),
                                   ),
-                                  // Botão Discreto 2: Atalhos de Internet
                                   _buildMinimalKey(
                                     label: activeView == _TVKeyboardView.web
                                         ? 'ABC'
@@ -1618,7 +1793,6 @@ Future<void> openTVVirtualKeyboard({
                                               : _TVKeyboardView.web;
                                     }),
                                   ),
-                                  // Letras finais Z X C V B N M
                                   for (final k in [
                                     'z',
                                     'x',
@@ -1633,14 +1807,12 @@ Future<void> openTVVirtualKeyboard({
                                       width: 35,
                                       onTap: () => appendText(c(k)),
                                     ),
-                                  // Barra de Espaço Compacta
                                   _buildMinimalKey(
                                     label: '␣',
                                     width: 66,
                                     color: const Color(0xFF1A2030),
                                     onTap: () => appendText(' '),
                                   ),
-                                  // Botão discreto de limpar tudo
                                   _buildMinimalKey(
                                     label: '✖',
                                     width: 35,
@@ -1653,10 +1825,7 @@ Future<void> openTVVirtualKeyboard({
                           ],
                         ),
                       ),
-
                       const SizedBox(width: 8),
-
-                      // 2. FORA DO TECLADO: APENAS O BOTÃO DE CONTINUAR
                       TVFocusableItem(
                         autoScroll: false,
                         onSelect: () {
@@ -2073,8 +2242,12 @@ class _SpeedTestDialogState extends State<SpeedTestDialog> {
   }
 }
 
+// =============================================================================
+// WIDGET DE FOCO COM SUPORTE A CLIQUE LONGO NO BOTÃO OK (FAVORITAR RÁPIDO NA TV)
+// =============================================================================
 class TVFocusableItem extends StatefulWidget {
   final VoidCallback onSelect;
+  final VoidCallback? onLongSelect;
   final Widget Function(BuildContext context, bool isFocused) builder;
   final bool autoScroll;
   final bool autofocus;
@@ -2085,6 +2258,7 @@ class TVFocusableItem extends StatefulWidget {
   const TVFocusableItem({
     super.key,
     required this.onSelect,
+    this.onLongSelect,
     required this.builder,
     this.autoScroll = true,
     this.autofocus = false,
@@ -2099,6 +2273,21 @@ class TVFocusableItem extends StatefulWidget {
 
 class _TVFocusableItemState extends State<TVFocusableItem> {
   bool _isFocused = false;
+  Timer? _longPressTimer;
+  bool _longPressTriggered = false;
+
+  @override
+  void dispose() {
+    _longPressTimer?.cancel();
+    super.dispose();
+  }
+
+  bool _isSelectKey(LogicalKeyboardKey key) {
+    return key == LogicalKeyboardKey.select ||
+        key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter ||
+        key == LogicalKeyboardKey.gameButtonA;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2106,32 +2295,51 @@ class _TVFocusableItemState extends State<TVFocusableItem> {
       focusNode: widget.focusNode,
       autofocus: widget.autofocus,
       onFocusChange: (focused) {
+        if (!focused) {
+          _longPressTimer?.cancel();
+        }
         setState(() => _isFocused = focused);
         if (focused && widget.autoScroll && mounted) {
           Scrollable.ensureVisible(
             context,
             alignment: 0.35,
-            duration: const Duration(milliseconds: 150),
+            duration: const Duration(milliseconds: 140),
             curve: Curves.easeOutCubic,
           );
         }
       },
       onKeyEvent: (node, event) {
-        if (event is KeyDownEvent) {
-          if (event.logicalKey == LogicalKeyboardKey.select ||
-              event.logicalKey == LogicalKeyboardKey.enter ||
-              event.logicalKey == LogicalKeyboardKey.numpadEnter ||
-              event.logicalKey == LogicalKeyboardKey.gameButtonA) {
-            widget.onSelect();
+        final key = event.logicalKey;
+        if (_isSelectKey(key)) {
+          if (event is KeyDownEvent) {
+            _longPressTriggered = false;
+            if (widget.onLongSelect != null) {
+              _longPressTimer?.cancel();
+              _longPressTimer = Timer(const Duration(milliseconds: 650), () {
+                _longPressTriggered = true;
+                widget.onLongSelect!();
+              });
+            } else {
+              widget.onSelect();
+            }
+            return KeyEventResult.handled;
+          } else if (event is KeyUpEvent) {
+            _longPressTimer?.cancel();
+            if (widget.onLongSelect != null && !_longPressTriggered) {
+              widget.onSelect();
+            }
             return KeyEventResult.handled;
           }
+        }
+
+        if (event is KeyDownEvent) {
           if (widget.onMoveLeft != null &&
-              event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+              key == LogicalKeyboardKey.arrowLeft) {
             widget.onMoveLeft!();
             return KeyEventResult.handled;
           }
           if (widget.onMoveRight != null &&
-              event.logicalKey == LogicalKeyboardKey.arrowRight) {
+              key == LogicalKeyboardKey.arrowRight) {
             widget.onMoveRight!();
             return KeyEventResult.handled;
           }
@@ -2141,6 +2349,7 @@ class _TVFocusableItemState extends State<TVFocusableItem> {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: widget.onSelect,
+        onLongPress: widget.onLongSelect,
         child: widget.builder(context, _isFocused),
       ),
     );
@@ -2197,9 +2406,6 @@ class TVIconButton extends StatelessWidget {
   }
 }
 
-// =============================================================================
-// PÔSTER ESTILO STREAMING COM BARRA DE PROGRESSO ("CONTINUAR ASSISTINDO")
-// =============================================================================
 Widget buildStreamingPosterCard({
   required String title,
   required String subtitle,
@@ -2402,9 +2608,6 @@ Widget buildChannelLogo(String url, {double size = 44}) {
   );
 }
 
-// =============================================================================
-// PARSER M3U EM SEGUNDO PLANO
-// =============================================================================
 List<StreamItem> parseM3UAdvanced(String raw) {
   final List<StreamItem> result = [];
   final lines = const LineSplitter().convert(raw);
