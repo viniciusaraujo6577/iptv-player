@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:video_player/video_player.dart';
 
 const Map<String, String> kIptvHeaders = {
   'User-Agent': 'IPTVSmartersPlayer/1.0 (Linux; Android 11)',
@@ -12,10 +14,12 @@ const Map<String, String> kIptvHeaders = {
 
 enum DeviceMode { mobile, tv }
 enum ContentType { live, movie, series }
-enum MainSection { live, movie, series, favorites, recents }
+enum MainSection { live, movie, series, continueWatching, favorites, recents }
 
 class StreamItem {
   final String id;
+  final String streamId;
+  final String tvgId;
   final String name;
   final String cleanName;
   final String seriesName;
@@ -30,6 +34,8 @@ class StreamItem {
 
   StreamItem({
     required this.id,
+    required this.streamId,
+    required this.tvgId,
     required this.name,
     required this.cleanName,
     required this.seriesName,
@@ -42,10 +48,457 @@ class StreamItem {
     required this.type,
     required this.isAdult,
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'streamId': streamId,
+        'tvgId': tvgId,
+        'name': name,
+        'cleanName': cleanName,
+        'seriesName': seriesName,
+        'seasonNumber': seasonNumber,
+        'episodeNumber': episodeNumber,
+        'qualityTag': qualityTag,
+        'group': group,
+        'logo': logo,
+        'url': url,
+        'type': type.index,
+        'isAdult': isAdult,
+      };
+
+  factory StreamItem.fromJson(Map<String, dynamic> json) {
+    final typeIdx = (json['type'] as int?) ?? 0;
+    return StreamItem(
+      id: json['id']?.toString() ?? '',
+      streamId: json['streamId']?.toString() ?? '',
+      tvgId: json['tvgId']?.toString() ?? '',
+      name: json['name']?.toString() ?? 'Conteúdo',
+      cleanName: json['cleanName']?.toString() ?? '',
+      seriesName: json['seriesName']?.toString() ?? '',
+      seasonNumber: (json['seasonNumber'] as int?) ?? 1,
+      episodeNumber: (json['episodeNumber'] as int?) ?? 1,
+      qualityTag: json['qualityTag']?.toString() ?? 'HD',
+      group: json['group']?.toString() ?? 'Geral',
+      logo: json['logo']?.toString() ?? '',
+      url: json['url']?.toString() ?? '',
+      type: ContentType.values[typeIdx.clamp(0, ContentType.values.length - 1)],
+      isAdult: json['isAdult'] == true,
+    );
+  }
 }
 
 // =============================================================================
-// MODELO AGRUPADOR DE SÉRIES (CAPA ÚNICA -> TEMPORADAS -> EPISÓDIOS)
+// MODELO DE PROGRESSO VOD ("CONTINUAR ASSISTINDO")
+// =============================================================================
+class VodProgressEntry {
+  final StreamItem item;
+  final int positionSeconds;
+  final int durationSeconds;
+  final int updatedAtMs;
+
+  VodProgressEntry({
+    required this.item,
+    required this.positionSeconds,
+    required this.durationSeconds,
+    required this.updatedAtMs,
+  });
+
+  double get progress => durationSeconds > 0
+      ? (positionSeconds / durationSeconds).clamp(0.0, 1.0)
+      : 0.0;
+
+  String get formattedRemaining {
+    final rem = (durationSeconds - positionSeconds).clamp(0, 86400);
+    final mins = (rem / 60).ceil();
+    return 'Faltam $mins min';
+  }
+
+  String get formattedPosition {
+    final m = (positionSeconds ~/ 60).toString().padLeft(2, '0');
+    final s = (positionSeconds % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  Map<String, dynamic> toJson() => {
+        'item': item.toJson(),
+        'positionSeconds': positionSeconds,
+        'durationSeconds': durationSeconds,
+        'updatedAtMs': updatedAtMs,
+      };
+
+  factory VodProgressEntry.fromJson(Map<String, dynamic> json) {
+    return VodProgressEntry(
+      item: StreamItem.fromJson(
+          (json['item'] as Map?)?.cast<String, dynamic>() ?? {}),
+      positionSeconds: (json['positionSeconds'] as int?) ?? 0,
+      durationSeconds: (json['durationSeconds'] as int?) ?? 1,
+      updatedAtMs: (json['updatedAtMs'] as int?) ?? 0,
+    );
+  }
+}
+
+// =============================================================================
+// MODELO E SERVIÇO DE GUIA DE PROGRAMAÇÃO ELETRÔNICA (EPG)
+// =============================================================================
+class EpgProgramInfo {
+  final String nowTitle;
+  final String nextTitle;
+  final String nowTimeRange;
+  final double progress;
+
+  const EpgProgramInfo({
+    required this.nowTitle,
+    required this.nextTitle,
+    this.nowTimeRange = 'AO VIVO',
+    this.progress = 0.45,
+  });
+}
+
+class EpgService {
+  static final Map<String, EpgProgramInfo> _cache = {};
+
+  static String _decodeMaybeBase64(String raw) {
+    if (raw.trim().isEmpty) return '';
+    try {
+      final decoded = utf8.decode(base64Decode(raw.trim()));
+      if (decoded.isNotEmpty && !decoded.contains('')) {
+        return decoded;
+      }
+    } catch (_) {}
+    return raw;
+  }
+
+  static Future<EpgProgramInfo> fetchEpgForChannel({
+    required StreamItem item,
+    required String serverDns,
+    required String username,
+    required String password,
+  }) async {
+    if (item.type != ContentType.live) {
+      return const EpgProgramInfo(
+        nowTitle: 'Conteúdo Sob Demanda (VOD)',
+        nextTitle: 'Controle de reprodução liberado',
+        nowTimeRange: 'CINEMA / SÉRIE',
+        progress: 1.0,
+      );
+    }
+
+    if (_cache.containsKey(item.id)) {
+      return _cache[item.id]!;
+    }
+
+    // 1. Consulta EPG via Xtream Codes API quando disponível
+    if (serverDns.isNotEmpty &&
+        username.isNotEmpty &&
+        password.isNotEmpty &&
+        item.streamId.isNotEmpty) {
+      try {
+        final uri = Uri.parse(
+            '$serverDns/player_api.php?username=$username&password=$password&action=get_short_epg&stream_id=${item.streamId}&limit=2');
+        final res = await http
+            .get(uri, headers: kIptvHeaders)
+            .timeout(const Duration(seconds: 4));
+
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body);
+          final listings = data['epg_listings'] as List?;
+          if (listings != null && listings.isNotEmpty) {
+            final first = listings[0] as Map;
+            final nowTitle =
+                _decodeMaybeBase64(first['title']?.toString() ?? '');
+            String nextTitle = 'Programação contínua do canal';
+            if (listings.length > 1) {
+              final second = listings[1] as Map;
+              final decodedNext =
+                  _decodeMaybeBase64(second['title']?.toString() ?? '');
+              if (decodedNext.isNotEmpty) nextTitle = decodedNext;
+            }
+
+            if (nowTitle.isNotEmpty) {
+              final info = EpgProgramInfo(
+                nowTitle: nowTitle,
+                nextTitle: nextTitle,
+                nowTimeRange: 'NO AR AGORA',
+                progress: 0.55,
+              );
+              _cache[item.id] = info;
+              return info;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 2. Fallback inteligente por horário e metadados do canal
+    final now = DateTime.now();
+    final hourStr = '${now.hour.toString().padLeft(2, '0')}:00';
+    final nextHourStr = '${((now.hour + 1) % 24).toString().padLeft(2, '0')}:00';
+    final minuteProgress = (now.minute / 60.0).clamp(0.05, 0.95);
+
+    final fallback = EpgProgramInfo(
+      nowTitle: '${item.cleanName} • Programação Ao Vivo ($hourStr)',
+      nextTitle: 'A Seguir ($nextHourStr): Grade ${item.group}',
+      nowTimeRange: '$hourStr - $nextHourStr',
+      progress: minuteProgress,
+    );
+    _cache[item.id] = fallback;
+    return fallback;
+  }
+}
+
+// =============================================================================
+// MOTOR DE VÍDEO COMPARTILHADO (ZERO REINICIALIZAÇÃO AO ALTERNAR TELAS)
+// =============================================================================
+class SharedStreamEngine extends ChangeNotifier {
+  static final SharedStreamEngine instance = SharedStreamEngine._internal();
+  SharedStreamEngine._internal();
+
+  VideoPlayerController? controller;
+  StreamItem? currentItem;
+  EpgProgramInfo? currentEpg;
+
+  bool isReady = false;
+  bool hasError = false;
+  bool isRecovering = false;
+  bool usingHlsFallback = false;
+
+  String serverDns = '';
+  String username = '';
+  String password = '';
+  double measuredSpeedMbps = 18.5;
+
+  Timer? _watchdogTimer;
+  Duration _lastPosition = Duration.zero;
+  int _stallCounter = 0;
+  int _recoveryAttempts = 0;
+  int _vodSaveTick = 0;
+
+  void Function(VodProgressEntry entry)? onVodProgressSaved;
+
+  void configureCredentials({
+    required String dns,
+    required String user,
+    required String pass,
+    required double speedMbps,
+  }) {
+    serverDns = dns;
+    username = user;
+    password = pass;
+    measuredSpeedMbps = speedMbps;
+  }
+
+  /// Inicia ou mantém o vídeo atual rodando sem reiniciar caso já esteja ativo
+  Future<void> openStream(
+    StreamItem item, {
+    Duration? startPosition,
+    bool forceReload = false,
+    bool tryHlsFallback = false,
+  }) async {
+    // SE O MESMO FLUXO JÁ ESTÁ TOCANDO, NÃO REINICIA!
+    if (!forceReload &&
+        currentItem?.url == item.url &&
+        controller != null &&
+        isReady &&
+        !hasError) {
+      if (startPosition != null && item.type != ContentType.live) {
+        await controller!.seekTo(startPosition);
+      }
+      if (!controller!.value.isPlaying) {
+        await controller!.play();
+      }
+      notifyListeners();
+      return;
+    }
+
+    _saveCurrentVodProgressImmediately();
+
+    currentItem = item;
+    isReady = false;
+    hasError = false;
+    isRecovering = false;
+    usingHlsFallback = tryHlsFallback;
+    if (!tryHlsFallback) _recoveryAttempts = 0;
+    notifyListeners();
+
+    // Busca o EPG em paralelo sem bloquear o vídeo
+    EpgService.fetchEpgForChannel(
+      item: item,
+      serverDns: serverDns,
+      username: username,
+      password: password,
+    ).then((epg) {
+      if (currentItem?.id == item.id) {
+        currentEpg = epg;
+        notifyListeners();
+      }
+    });
+
+    String targetUrl = item.url;
+    if (tryHlsFallback && targetUrl.endsWith('.ts')) {
+      targetUrl = '${targetUrl.substring(0, targetUrl.length - 3)}.m3u8';
+    }
+
+    final oldController = controller;
+    final newController = VideoPlayerController.networkUrl(
+      Uri.parse(targetUrl),
+      httpHeaders: kIptvHeaders,
+    );
+    controller = newController;
+    await oldController?.dispose();
+
+    try {
+      await newController.initialize();
+      if (currentItem?.id != item.id) return;
+
+      // Baixa latência para TV ao vivo vs Posição salva para Filmes/Séries
+      if (item.type != ContentType.live &&
+          startPosition != null &&
+          startPosition.inSeconds > 5) {
+        await newController.seekTo(startPosition);
+      } else if (measuredSpeedMbps < 8.0 && item.type != ContentType.live) {
+        await Future.delayed(const Duration(milliseconds: 350));
+      }
+
+      isReady = true;
+      isRecovering = false;
+      await newController.play();
+      _startWatchdog();
+      notifyListeners();
+    } catch (_) {
+      if (currentItem?.id != item.id) return;
+      if (_recoveryAttempts < 2) {
+        _recoveryAttempts++;
+        await openStream(
+          item,
+          startPosition: startPosition,
+          forceReload: true,
+          tryHlsFallback: !tryHlsFallback,
+        );
+      } else {
+        hasError = true;
+        notifyListeners();
+      }
+    }
+  }
+
+  void _startWatchdog() {
+    _watchdogTimer?.cancel();
+    _stallCounter = 0;
+    _vodSaveTick = 0;
+
+    _watchdogTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      final ctrl = controller;
+      final item = currentItem;
+      if (ctrl == null || item == null || !isReady) return;
+
+      final val = ctrl.value;
+      if (!val.isPlaying) return;
+
+      // Salva progresso automático de Filmes e Episódios a cada 6 segundos
+      if (item.type != ContentType.live) {
+        _vodSaveTick++;
+        if (_vodSaveTick >= 3) {
+          _vodSaveTick = 0;
+          _saveCurrentVodProgressImmediately();
+        }
+      }
+
+      // Monitor Anti-Travamento e Baixa Latência
+      if (val.position == _lastPosition && val.isBuffering) {
+        _stallCounter++;
+        if (_stallCounter >= 2 && !isRecovering) {
+          isRecovering = true;
+          notifyListeners();
+
+          if (item.type == ContentType.live) {
+            // Em canais ao vivo, pula para o pacote mais recente do buffer para zerar atraso
+            if (val.buffered.isNotEmpty) {
+              final liveEdge = val.buffered.last.end;
+              if (liveEdge > val.position + const Duration(seconds: 2)) {
+                await ctrl.seekTo(liveEdge);
+              }
+            }
+            await ctrl.play();
+          } else {
+            await ctrl.pause();
+            await Future.delayed(const Duration(milliseconds: 700));
+            await ctrl.play();
+          }
+
+          isRecovering = false;
+          _stallCounter = 0;
+          notifyListeners();
+        }
+      } else {
+        _stallCounter = 0;
+      }
+      _lastPosition = val.position;
+    });
+  }
+
+  void _saveCurrentVodProgressImmediately() {
+    final ctrl = controller;
+    final item = currentItem;
+    if (ctrl == null || item == null || !isReady) return;
+    if (item.type == ContentType.live) return;
+
+    final posSec = ctrl.value.position.inSeconds;
+    final durSec = ctrl.value.duration.inSeconds;
+    if (posSec >= 10 && durSec > 30) {
+      final entry = VodProgressEntry(
+        item: item,
+        positionSeconds: posSec,
+        durationSeconds: durSec,
+        updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      AppStorage.saveVodProgressEntry(entry);
+      onVodProgressSaved?.call(entry);
+    }
+  }
+
+  void togglePlayPause() {
+    if (controller == null || !isReady) return;
+    if (controller!.value.isPlaying) {
+      controller!.pause();
+      _saveCurrentVodProgressImmediately();
+    } else {
+      controller!.play();
+    }
+    notifyListeners();
+  }
+
+  Future<void> seekRelative(int seconds) async {
+    if (controller == null || !isReady) return;
+    final pos = controller!.value.position;
+    final dur = controller!.value.duration;
+    final target = pos + Duration(seconds: seconds);
+    if (target < Duration.zero) {
+      await controller!.seekTo(Duration.zero);
+    } else if (dur > Duration.zero && target > dur) {
+      await controller!.seekTo(dur);
+    } else {
+      await controller!.seekTo(target);
+    }
+    _saveCurrentVodProgressImmediately();
+    notifyListeners();
+  }
+
+  Future<void> stopAndClear() async {
+    _saveCurrentVodProgressImmediately();
+    _watchdogTimer?.cancel();
+    final old = controller;
+    controller = null;
+    currentItem = null;
+    currentEpg = null;
+    isReady = false;
+    hasError = false;
+    notifyListeners();
+    await old?.dispose();
+  }
+}
+
+// =============================================================================
+// AGRUPADOR DE SÉRIES (CAPA -> TEMPORADAS -> EPISÓDIOS)
 // =============================================================================
 class SeriesGroup {
   final String id;
@@ -125,13 +578,10 @@ List<SeriesGroup> groupSeriesItems(List<StreamItem> items) {
   return result;
 }
 
-// =============================================================================
-// TRANSIÇÃO ANIMADA FLUIDA ENTRE TELAS
-// =============================================================================
 Route<T> createSmoothRoute<T>(Widget page) {
   return PageRouteBuilder<T>(
-    transitionDuration: const Duration(milliseconds: 280),
-    reverseTransitionDuration: const Duration(milliseconds: 220),
+    transitionDuration: const Duration(milliseconds: 240),
+    reverseTransitionDuration: const Duration(milliseconds: 200),
     pageBuilder: (context, animation, secondaryAnimation) => page,
     transitionsBuilder: (context, animation, secondaryAnimation, child) {
       final curved = CurvedAnimation(
@@ -141,7 +591,7 @@ Route<T> createSmoothRoute<T>(Widget page) {
       return FadeTransition(
         opacity: curved,
         child: ScaleTransition(
-          scale: Tween<double>(begin: 0.97, end: 1.0).animate(curved),
+          scale: Tween<double>(begin: 0.98, end: 1.0).animate(curved),
           child: child,
         ),
       );
@@ -150,13 +600,15 @@ Route<T> createSmoothRoute<T>(Widget page) {
 }
 
 // =============================================================================
-// ARMAZENAMENTO DE PREFERÊNCIA DE DISPOSITIVO E SESSÃO
+// ARMAZENAMENTO LOCAL (DISPOSITIVO, SESSÃO E PROGRESSO DE FILMES/SÉRIES)
 // =============================================================================
 class AppStorage {
   static File get _deviceFile =>
-      File('${Directory.systemTemp.path}/unex_device_mode_v6.json');
+      File('${Directory.systemTemp.path}/unex_device_mode_v7.json');
   static File get _sessionFile =>
-      File('${Directory.systemTemp.path}/unex_verified_session_v6.json');
+      File('${Directory.systemTemp.path}/unex_verified_session_v7.json');
+  static File get _vodProgressFile =>
+      File('${Directory.systemTemp.path}/unex_vod_progress_v7.json');
 
   static Future<DeviceMode?> loadDeviceMode() async {
     try {
@@ -200,6 +652,38 @@ class AppStorage {
       if (await _sessionFile.exists()) {
         await _sessionFile.delete();
       }
+    } catch (_) {}
+  }
+
+  static Future<Map<String, VodProgressEntry>> loadVodProgressMap() async {
+    try {
+      if (await _vodProgressFile.exists()) {
+        final raw = jsonDecode(await _vodProgressFile.readAsString())
+            as Map<String, dynamic>;
+        final Map<String, VodProgressEntry> map = {};
+        raw.forEach((key, value) {
+          if (value is Map) {
+            map[key] =
+                VodProgressEntry.fromJson(value.cast<String, dynamic>());
+          }
+        });
+        return map;
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  static Future<void> saveVodProgressEntry(VodProgressEntry entry) async {
+    try {
+      final map = await loadVodProgressMap();
+      if (entry.progress >= 0.96) {
+        map.remove(entry.item.id);
+      } else {
+        map[entry.item.id] = entry;
+      }
+      final serialized =
+          map.map((key, value) => MapEntry(key, value.toJson()));
+      await _vodProgressFile.writeAsString(jsonEncode(serialized));
     } catch (_) {}
   }
 }
@@ -290,11 +774,108 @@ Future<void> showExitAppConfirmationDialog(BuildContext context) async {
 }
 
 // =============================================================================
-// MODAL STREAMING DE TEMPORADAS E EPISÓDIOS DA SÉRIE (CELULAR E TV)
+// DIÁLOGO DE RETOMADA DE PROGRESSO ("CONTINUAR DE ONDE PAROU")
+// =============================================================================
+Future<Duration?> showVodResumePrompt({
+  required BuildContext context,
+  required VodProgressEntry entry,
+}) async {
+  return showDialog<Duration?>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF121622),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+        side: const BorderSide(color: Color(0xFF00E5FF), width: 1.2),
+      ),
+      title: Row(
+        children: [
+          const Icon(Icons.history_toggle_off_rounded,
+              color: Color(0xFF00E5FF)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              entry.item.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 16),
+            ),
+          ),
+        ],
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Você parou em ${entry.formattedPosition} (${entry.formattedRemaining}).',
+            style: const TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: entry.progress,
+              minHeight: 6,
+              backgroundColor: Colors.white12,
+              color: const Color(0xFF00E5FF),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TVFocusableItem(
+          autofocus: true,
+          autoScroll: false,
+          onSelect: () =>
+              Navigator.pop(ctx, Duration(seconds: entry.positionSeconds)),
+          builder: (context, isFocused) => Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF00E5FF), Color(0xFF2979FF)],
+              ),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: isFocused ? Colors.white : Colors.transparent,
+                width: 2,
+              ),
+            ),
+            child: Text(
+              'Continuar de ${entry.formattedPosition}',
+              style: const TextStyle(
+                  color: Colors.black, fontWeight: FontWeight.w900),
+            ),
+          ),
+        ),
+        TVFocusableItem(
+          autoScroll: false,
+          onSelect: () => Navigator.pop(ctx, Duration.zero),
+          builder: (context, isFocused) => Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1B2030),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: isFocused ? const Color(0xFF00E5FF) : Colors.white12,
+                width: 1.5,
+              ),
+            ),
+            child: const Text('Começar do Início'),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+// =============================================================================
+// MODAL STREAMING DE TEMPORADAS E EPISÓDIOS DA SÉRIE (COM BARRA DE PROGRESSO)
 // =============================================================================
 Future<void> openSeriesDetailsModal({
   required BuildContext context,
   required SeriesGroup series,
+  required Map<String, VodProgressEntry> vodProgressMap,
   required void Function(StreamItem episode, List<StreamItem> fullSeriesPlaylist)
       onPlayEpisode,
 }) async {
@@ -324,7 +905,6 @@ Future<void> openSeriesDetailsModal({
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // CABEÇALHO ESTILO STREAMING COM CAPA E RESUMO DA SÉRIE
                   Container(
                     padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
@@ -463,8 +1043,6 @@ Future<void> openSeriesDetailsModal({
                       ],
                     ),
                   ),
-
-                  // SELETOR HORIZONTAL DE TEMPORADAS
                   Container(
                     height: 52,
                     padding:
@@ -530,8 +1108,6 @@ Future<void> openSeriesDetailsModal({
                       },
                     ),
                   ),
-
-                  // LISTA ANIMADA DE EPISÓDIOS DA TEMPORADA
                   Expanded(
                     child: AnimatedSwitcher(
                       duration: const Duration(milliseconds: 220),
@@ -541,6 +1117,8 @@ Future<void> openSeriesDetailsModal({
                         itemCount: currentEpisodes.length,
                         itemBuilder: (context, index) {
                           final ep = currentEpisodes[index];
+                          final savedEntry = vodProgressMap[ep.id];
+
                           return Padding(
                             padding: const EdgeInsets.only(bottom: 8),
                             child: TVFocusableItem(
@@ -552,7 +1130,7 @@ Future<void> openSeriesDetailsModal({
                                   AnimatedContainer(
                                 duration: const Duration(milliseconds: 140),
                                 padding: const EdgeInsets.symmetric(
-                                    horizontal: 14, vertical: 12),
+                                    horizontal: 14, vertical: 10),
                                 decoration: BoxDecoration(
                                   color: isFocused
                                       ? const Color(0xFF1A2842)
@@ -565,64 +1143,85 @@ Future<void> openSeriesDetailsModal({
                                     width: isFocused ? 2 : 1,
                                   ),
                                 ),
-                                child: Row(
+                                child: Column(
                                   children: [
-                                    Container(
-                                      width: 42,
-                                      height: 42,
-                                      alignment: Alignment.center,
-                                      decoration: BoxDecoration(
-                                        color: isFocused
-                                            ? const Color(0xFF00E5FF)
-                                            : Colors.white10,
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: Text(
-                                        'E${ep.episodeNumber.toString().padLeft(2, '0')}',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w900,
-                                          fontSize: 13,
+                                    Row(
+                                      children: [
+                                        Container(
+                                          width: 42,
+                                          height: 42,
+                                          alignment: Alignment.center,
+                                          decoration: BoxDecoration(
+                                            color: isFocused
+                                                ? const Color(0xFF00E5FF)
+                                                : Colors.white10,
+                                            borderRadius:
+                                                BorderRadius.circular(10),
+                                          ),
+                                          child: Text(
+                                            'E${ep.episodeNumber.toString().padLeft(2, '0')}',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w900,
+                                              fontSize: 13,
+                                              color: isFocused
+                                                  ? Colors.black
+                                                  : const Color(0xFF00E5FF),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 14),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                ep.name,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 3),
+                                              Text(
+                                                savedEntry != null
+                                                    ? 'Continuar de ${savedEntry.formattedPosition} • ${savedEntry.formattedRemaining}'
+                                                    : 'Temporada $selectedSeason • Episódio ${ep.episodeNumber}',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  color: savedEntry != null
+                                                      ? const Color(0xFF00E5FF)
+                                                      : Colors.white54,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        buildQualityBadge(ep.qualityTag),
+                                        const SizedBox(width: 10),
+                                        Icon(
+                                          Icons.play_circle_fill_rounded,
                                           color: isFocused
-                                              ? Colors.black
-                                              : const Color(0xFF00E5FF),
+                                              ? const Color(0xFF00E5FF)
+                                              : Colors.white54,
+                                          size: 28,
+                                        ),
+                                      ],
+                                    ),
+                                    if (savedEntry != null) ...[
+                                      const SizedBox(height: 8),
+                                      ClipRRect(
+                                        borderRadius: BorderRadius.circular(4),
+                                        child: LinearProgressIndicator(
+                                          value: savedEntry.progress,
+                                          minHeight: 4,
+                                          backgroundColor: Colors.white10,
+                                          color: const Color(0xFF00E5FF),
                                         ),
                                       ),
-                                    ),
-                                    const SizedBox(width: 14),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            ep.name,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 3),
-                                          Text(
-                                            'Temporada $selectedSeason • Episódio ${ep.episodeNumber}',
-                                            style: const TextStyle(
-                                              fontSize: 11,
-                                              color: Colors.white54,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    buildQualityBadge(ep.qualityTag),
-                                    const SizedBox(width: 10),
-                                    Icon(
-                                      Icons.play_circle_fill_rounded,
-                                      color: isFocused
-                                          ? const Color(0xFF00E5FF)
-                                          : Colors.white54,
-                                      size: 28,
-                                    ),
+                                    ],
                                   ],
                                 ),
                               ),
@@ -643,7 +1242,7 @@ Future<void> openSeriesDetailsModal({
 }
 
 // =============================================================================
-// TECLADO VIRTUAL PRÓPRIO PARA TV ANDROID
+// TECLADO VIRTUAL QWERTY INTEGRADO DE TV (DOCK INFERIOR TRANSLÚCIDO + MENU WEB)
 // =============================================================================
 Future<void> openTVVirtualKeyboard({
   required BuildContext context,
@@ -656,28 +1255,41 @@ Future<void> openTVVirtualKeyboard({
 }) async {
   String currentText = controller.text;
   bool isUppercase = false;
+  bool showWebShortcutsMenu = false;
 
-  final List<String> alphaRows = [
+  final List<String> qwertyRows = [
     '1234567890',
     'qwertyuiop',
     'asdfghjkl',
     'zxcvbnm',
-    ':/.-_?=&@',
   ];
 
-  final List<String> urlShortcuts = [
+  final List<String> webShortcuts = [
     'http://',
     'https://',
     '.club',
     '.com',
     '.net',
     '.org',
+    '.br',
     ':80',
     ':8080',
+    '/get.php?',
+    '/',
+    ':',
+    '.',
+    '-',
+    '_',
+    '?',
+    '=',
+    '&',
+    '@',
   ];
 
   await showDialog(
     context: context,
+    // Mantém o fundo transparente para visualizar os canais/filmes sendo filtrados ao vivo!
+    barrierColor: Colors.black.withOpacity(0.18),
     barrierDismissible: true,
     builder: (ctx) {
       return StatefulBuilder(
@@ -708,134 +1320,198 @@ Future<void> openTVVirtualKeyboard({
             onChanged?.call('');
           }
 
-          return Dialog(
-            backgroundColor: const Color(0xFF10131C),
-            insetPadding:
-                const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(20),
-              side: const BorderSide(color: Color(0xFF00E5FF), width: 1.5),
-            ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 680),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
+          return Align(
+            alignment: Alignment.bottomCenter,
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: 720,
+                margin: const EdgeInsets.only(bottom: 12, left: 16, right: 16),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0B0E17).withOpacity(0.95),
+                  borderRadius: BorderRadius.circular(20),
+                  border:
+                      Border.all(color: const Color(0xFF00E5FF), width: 1.5),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.75),
+                      blurRadius: 24,
+                      offset: const Offset(0, -4),
+                    )
+                  ],
+                ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // BARRA COMPACTA COM VISOR DO TEXTO AO VIVO
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Row(
-                          children: [
-                            const Icon(Icons.keyboard_alt_outlined,
-                                color: Color(0xFF00E5FF), size: 20),
-                            const SizedBox(width: 8),
-                            Text(
-                              title,
-                              style: const TextStyle(
-                                fontSize: 15,
+                        const Icon(Icons.keyboard_rounded,
+                            color: Color(0xFF00E5FF), size: 18),
+                        const SizedBox(width: 8),
+                        Text(
+                          '$title:',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF00E5FF),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 7),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF06080C),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.white12),
+                            ),
+                            child: Text(
+                              currentText.isEmpty
+                                  ? 'Digite usando as setas do controle...'
+                                  : '$currentText▌',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 14,
                                 fontWeight: FontWeight.bold,
-                                color: Color(0xFF00E5FF),
+                                color: currentText.isEmpty
+                                    ? Colors.white38
+                                    : Colors.white,
                               ),
                             ),
-                          ],
+                          ),
                         ),
-                        const Text(
-                          'Use as setas do controle e aperte OK',
-                          style: TextStyle(fontSize: 11, color: Colors.white54),
+                        const SizedBox(width: 8),
+                        _buildKeyButton(
+                          label: '✓ OK',
+                          width: 72,
+                          height: 32,
+                          color: const Color(0xFF00E5FF),
+                          textColor: Colors.black,
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            onCompleted?.call();
+                          },
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 11),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF07080C),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.white24),
-                      ),
-                      child: Text(
-                        currentText.isEmpty
-                            ? ' (Vazio - selecione as teclas abaixo)'
-                            : '$currentText▌',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: currentText.isEmpty
-                              ? Colors.white38
-                              : Colors.white,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    if (isUrlField && !isNumericOnly) ...[
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 6,
-                        alignment: WrapAlignment.center,
-                        children: urlShortcuts.map((shortcut) {
-                          return _buildKeyButton(
-                            label: shortcut,
-                            color: const Color(0xFF17243A),
-                            textColor: const Color(0xFF00E5FF),
-                            onTap: () => appendText(shortcut),
-                          );
-                        }).toList(),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                    if (isNumericOnly)
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        alignment: WrapAlignment.center,
-                        children: '1234567890'.split('').map((digit) {
-                          return _buildKeyButton(
-                            label: digit,
-                            width: 54,
-                            height: 44,
-                            autofocus: digit == '1',
-                            onTap: () => appendText(digit),
-                          );
-                        }).toList(),
-                      )
-                    else
-                      ...alphaRows.asMap().entries.map((entry) {
-                        final rowIndex = entry.key;
-                        final chars = entry.value.split('');
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 5),
-                          child: Wrap(
-                            spacing: 5,
-                            runSpacing: 5,
-                            alignment: WrapAlignment.center,
-                            children: chars.asMap().entries.map((charEntry) {
-                              final rawChar = charEntry.value;
-                              final displayChar =
-                                  isUppercase ? rawChar.toUpperCase() : rawChar;
-                              return _buildKeyButton(
-                                label: displayChar,
-                                width: 45,
-                                height: 36,
-                                autofocus: rowIndex == 1 && charEntry.key == 0,
-                                onTap: () => appendText(displayChar),
-                              );
-                            }).toList(),
-                          ),
-                        );
-                      }),
                     const SizedBox(height: 8),
+
+                    // SUB-MENU UNIFICADO DE ATALHOS DE INTERNET (ACESSADO PELA TECLA 🌐 WEB)
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 180),
+                      child: showWebShortcutsMenu
+                          ? Container(
+                              key: const ValueKey('web_shortcuts_panel'),
+                              padding: const EdgeInsets.all(10),
+                              margin: const EdgeInsets.only(bottom: 8),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF131929),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                    color: const Color(0xFF00E5FF)
+                                        .withOpacity(0.4)),
+                              ),
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'ATALHOS RÁPIDOS DE INTERNET E SÍMBOLOS',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF00E5FF),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Wrap(
+                                    spacing: 6,
+                                    runSpacing: 6,
+                                    alignment: WrapAlignment.center,
+                                    children:
+                                        webShortcuts.asMap().entries.map((e) {
+                                      return _buildKeyButton(
+                                        label: e.value,
+                                        height: 32,
+                                        autofocus: e.key == 0,
+                                        color: const Color(0xFF1A253B),
+                                        textColor: const Color(0xFF00E5FF),
+                                        onTap: () => appendText(e.value),
+                                      );
+                                    }).toList(),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : isNumericOnly
+                              ? Padding(
+                                  key: const ValueKey('numeric_rows'),
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 6),
+                                  child: Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    alignment: WrapAlignment.center,
+                                    children:
+                                        '1234567890'.split('').map((digit) {
+                                      return _buildKeyButton(
+                                        label: digit,
+                                        width: 52,
+                                        height: 38,
+                                        autofocus: digit == '1',
+                                        onTap: () => appendText(digit),
+                                      );
+                                    }).toList(),
+                                  ),
+                                )
+                              : Column(
+                                  key: const ValueKey('qwerty_rows'),
+                                  children:
+                                      qwertyRows.asMap().entries.map((entry) {
+                                    final rIdx = entry.key;
+                                    final chars = entry.value.split('');
+                                    return Padding(
+                                      padding: const EdgeInsets.only(bottom: 4),
+                                      child: Wrap(
+                                        spacing: 5,
+                                        runSpacing: 4,
+                                        alignment: WrapAlignment.center,
+                                        children: chars
+                                            .asMap()
+                                            .entries
+                                            .map((charEntry) {
+                                          final raw = charEntry.value;
+                                          final ch = isUppercase
+                                              ? raw.toUpperCase()
+                                              : raw;
+                                          return _buildKeyButton(
+                                            label: ch,
+                                            width: 44,
+                                            height: 32,
+                                            autofocus: rIdx == 1 &&
+                                                charEntry.key == 0,
+                                            onTap: () => appendText(ch),
+                                          );
+                                        }).toList(),
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                    ),
+
+                    // BARRA DE FUNÇÕES + PEQUENA TECLA DE MENU DE ATALHOS WEB
                     Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
+                      spacing: 6,
+                      runSpacing: 6,
                       alignment: WrapAlignment.center,
                       children: [
                         if (!isNumericOnly)
                           _buildKeyButton(
-                            label: isUppercase ? '⇧ MAIÚSC' : '⇧ minúsc',
+                            label: isUppercase ? '⇧ ABC' : '⇧ abc',
+                            height: 32,
                             color: isUppercase
                                 ? const Color(0xFF00E5FF)
                                 : const Color(0xFF1C202E),
@@ -846,26 +1522,45 @@ Future<void> openTVVirtualKeyboard({
                           ),
                         if (!isNumericOnly)
                           _buildKeyButton(
+                            label: showWebShortcutsMenu
+                                ? '⌨ QWERTY'
+                                : '🌐 Atalhos Web',
+                            height: 32,
+                            color: showWebShortcutsMenu
+                                ? const Color(0xFF00E5FF)
+                                : const Color(0xFF17243A),
+                            textColor: showWebShortcutsMenu
+                                ? Colors.black
+                                : const Color(0xFF00E5FF),
+                            onTap: () => setModalState(() =>
+                                showWebShortcutsMenu = !showWebShortcutsMenu),
+                          ),
+                        if (!isNumericOnly)
+                          _buildKeyButton(
                             label: 'ESPAÇO',
-                            width: 100,
+                            width: 110,
+                            height: 32,
                             color: const Color(0xFF1C202E),
                             onTap: () => appendText(' '),
                           ),
                         _buildKeyButton(
-                          label: '⌫ APAGAR',
+                          label: '⌫ Apagar',
+                          height: 32,
                           color: const Color(0xFF2C1D24),
                           textColor: Colors.orangeAccent,
                           onTap: backspace,
                         ),
                         _buildKeyButton(
-                          label: 'LIMPAR',
+                          label: 'Limpar',
+                          height: 32,
                           color: const Color(0xFF2C1D24),
                           textColor: Colors.redAccent,
                           onTap: clearAll,
                         ),
                         _buildKeyButton(
-                          label: '✓ CONCLUIR',
-                          width: 125,
+                          label: 'Concluir',
+                          width: 95,
+                          height: 32,
                           color: const Color(0xFF00E5FF),
                           textColor: Colors.black,
                           onTap: () {
@@ -890,7 +1585,7 @@ Widget _buildKeyButton({
   required String label,
   required VoidCallback onTap,
   double? width,
-  double height = 36,
+  double height = 34,
   Color color = const Color(0xFF181C28),
   Color textColor = Colors.white,
   bool autofocus = false,
@@ -900,25 +1595,25 @@ Widget _buildKeyButton({
     autoScroll: false,
     onSelect: onTap,
     builder: (context, isFocused) => AnimatedScale(
-      scale: isFocused ? 1.1 : 1.0,
-      duration: const Duration(milliseconds: 90),
+      scale: isFocused ? 1.08 : 1.0,
+      duration: const Duration(milliseconds: 80),
       child: Container(
         width: width,
         height: height,
-        padding: EdgeInsets.symmetric(horizontal: width == null ? 12 : 0),
+        padding: EdgeInsets.symmetric(horizontal: width == null ? 10 : 0),
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: isFocused ? const Color(0xFF00E5FF) : color,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(7),
           border: Border.all(
             color: isFocused ? Colors.white : Colors.white12,
-            width: isFocused ? 2 : 1,
+            width: isFocused ? 1.8 : 1,
           ),
         ),
         child: Text(
           label,
           style: TextStyle(
-            fontSize: 13,
+            fontSize: 12,
             fontWeight: FontWeight.bold,
             color: isFocused ? Colors.black : textColor,
           ),
@@ -1017,7 +1712,7 @@ class _AdaptiveInputFieldState extends State<AdaptiveInputField> {
         openTVVirtualKeyboard(
           context: context,
           controller: widget.controller,
-          title: 'Digitar: ${widget.label}',
+          title: widget.label,
           isUrlField: widget.isUrlField,
           onChanged: widget.onChanged,
         );
@@ -1071,7 +1766,7 @@ class _AdaptiveInputFieldState extends State<AdaptiveInputField> {
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Text(
-                'OK p/ Digitar',
+                'OK p/ Teclado TV',
                 style: TextStyle(
                   fontSize: 10,
                   fontWeight: FontWeight.bold,
@@ -1237,9 +1932,6 @@ class _SpeedTestDialogState extends State<SpeedTestDialog> {
   }
 }
 
-// =============================================================================
-// WIDGET DE FOCO COM SUPORTE A GATILHO DE BORDA ESQUERDA (REABRIR MENU LATERAL)
-// =============================================================================
 class TVFocusableItem extends StatefulWidget {
   final VoidCallback onSelect;
   final Widget Function(BuildContext context, bool isFocused) builder;
@@ -1247,6 +1939,7 @@ class TVFocusableItem extends StatefulWidget {
   final bool autofocus;
   final FocusNode? focusNode;
   final VoidCallback? onMoveLeft;
+  final VoidCallback? onMoveRight;
 
   const TVFocusableItem({
     super.key,
@@ -1256,6 +1949,7 @@ class TVFocusableItem extends StatefulWidget {
     this.autofocus = false,
     this.focusNode,
     this.onMoveLeft,
+    this.onMoveRight,
   });
 
   @override
@@ -1276,7 +1970,7 @@ class _TVFocusableItemState extends State<TVFocusableItem> {
           Scrollable.ensureVisible(
             context,
             alignment: 0.35,
-            duration: const Duration(milliseconds: 160),
+            duration: const Duration(milliseconds: 150),
             curve: Curves.easeOutCubic,
           );
         }
@@ -1293,6 +1987,11 @@ class _TVFocusableItemState extends State<TVFocusableItem> {
           if (widget.onMoveLeft != null &&
               event.logicalKey == LogicalKeyboardKey.arrowLeft) {
             widget.onMoveLeft!();
+            return KeyEventResult.handled;
+          }
+          if (widget.onMoveRight != null &&
+              event.logicalKey == LogicalKeyboardKey.arrowRight) {
+            widget.onMoveRight!();
             return KeyEventResult.handled;
           }
         }
@@ -1358,7 +2057,7 @@ class TVIconButton extends StatelessWidget {
 }
 
 // =============================================================================
-// PÔSTER ESTILO CINEMA / STREAMING PARA FILMES E SÉRIES
+// PÔSTER ESTILO STREAMING COM BARRA DE PROGRESSO ("CONTINUAR ASSISTINDO")
 // =============================================================================
 Widget buildStreamingPosterCard({
   required String title,
@@ -1369,14 +2068,15 @@ Widget buildStreamingPosterCard({
   bool isFocused = false,
   bool isPlaying = false,
   bool isFavorite = false,
+  double? progress,
   VoidCallback? onFavoriteTap,
 }) {
   return AnimatedScale(
     scale: isFocused ? 1.06 : 1.0,
-    duration: const Duration(milliseconds: 160),
+    duration: const Duration(milliseconds: 150),
     curve: Curves.easeOutCubic,
     child: AnimatedContainer(
-      duration: const Duration(milliseconds: 160),
+      duration: const Duration(milliseconds: 150),
       decoration: BoxDecoration(
         color: const Color(0xFF121622),
         borderRadius: BorderRadius.circular(14),
@@ -1426,7 +2126,7 @@ Widget buildStreamingPosterCard({
                   colors: [
                     Colors.black.withOpacity(0.35),
                     Colors.transparent,
-                    Colors.black.withOpacity(0.92),
+                    Colors.black.withOpacity(0.94),
                   ],
                   stops: const [0.0, 0.45, 1.0],
                 ),
@@ -1488,6 +2188,18 @@ Widget buildStreamingPosterCard({
                       fontWeight: FontWeight.bold,
                     ),
                   ),
+                  if (progress != null && progress > 0) ...[
+                    const SizedBox(height: 6),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: progress.clamp(0.05, 1.0),
+                        minHeight: 4,
+                        backgroundColor: Colors.white24,
+                        color: const Color(0xFF00E5FF),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1550,7 +2262,7 @@ Widget buildChannelLogo(String url, {double size = 44}) {
 }
 
 // =============================================================================
-// PARSER AVANÇADO COM EXTRAÇÃO DE TEMPORADA E EPISÓDIO PARA SÉRIES
+// PARSER M3U EM SEGUNDO PLANO (EXTRAI STREAM_ID, TVG_ID, SÉRIES E QUALIDADE)
 // =============================================================================
 List<StreamItem> parseM3UAdvanced(String raw) {
   final List<StreamItem> result = [];
@@ -1559,10 +2271,14 @@ List<StreamItem> parseM3UAdvanced(String raw) {
   String name = '';
   String group = 'Canais';
   String logo = '';
+  String tvgId = '';
   int counter = 0;
 
   final groupRegex = RegExp(r'group-title="([^"]*)"', caseSensitive: false);
   final logoRegex = RegExp(r'tvg-logo="([^"]*)"', caseSensitive: false);
+  final tvgIdRegex = RegExp(r'tvg-id="([^"]*)"', caseSensitive: false);
+  final streamIdRegex =
+      RegExp(r'/(\d+)\.(?:ts|m3u8|mp4|mkv)$|/(\d+)$', caseSensitive: false);
   final qualityRegex = RegExp(
       r'\b(4K|UHD|FHD|1080P|HD|720P|SD|H265|HEVC)\b',
       caseSensitive: false);
@@ -1577,10 +2293,12 @@ List<StreamItem> parseM3UAdvanced(String raw) {
     if (trimmed.startsWith('#EXTINF:')) {
       final groupMatch = groupRegex.firstMatch(trimmed);
       final logoMatch = logoRegex.firstMatch(trimmed);
+      final idMatch = tvgIdRegex.firstMatch(trimmed);
 
       group = groupMatch?.group(1)?.trim() ?? 'Geral';
       if (group.isEmpty) group = 'Geral';
       logo = logoMatch?.group(1)?.trim() ?? '';
+      tvgId = idMatch?.group(1)?.trim() ?? '';
 
       final commaIndex = trimmed.lastIndexOf(',');
       if (commaIndex != -1 && commaIndex + 1 < trimmed.length) {
@@ -1593,6 +2311,12 @@ List<StreamItem> parseM3UAdvanced(String raw) {
       final lowerUrl = trimmed.toLowerCase();
       final lowerGroup = group.toLowerCase();
       final lowerName = name.toLowerCase();
+
+      String extractedStreamId = '';
+      final sidMatch = streamIdRegex.firstMatch(trimmed);
+      if (sidMatch != null) {
+        extractedStreamId = sidMatch.group(1) ?? sidMatch.group(2) ?? '';
+      }
 
       RegExpMatch? seMatch = sePattern1.firstMatch(name) ??
           sePattern2.firstMatch(name) ??
@@ -1662,6 +2386,8 @@ List<StreamItem> parseM3UAdvanced(String raw) {
       result.add(
         StreamItem(
           id: '${counter}_${trimmed.hashCode}',
+          streamId: extractedStreamId,
+          tvgId: tvgId,
           name: name.isNotEmpty ? name : 'Canal $counter',
           cleanName: cleanName.isNotEmpty ? cleanName : name,
           seriesName: extractedSeriesName,
@@ -1679,6 +2405,7 @@ List<StreamItem> parseM3UAdvanced(String raw) {
       name = '';
       group = 'Geral';
       logo = '';
+      tvgId = '';
     }
   }
   return result;
