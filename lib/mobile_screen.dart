@@ -12,13 +12,17 @@ class MobileDashboardView extends StatelessWidget {
   final int liveCount;
   final int movieCount;
   final int seriesCount;
+  final int continueWatchingCount;
   final int favoritesCount;
   final int recentsCount;
   final String accountExpDate;
   final List<StreamItem> displayedItems;
   final List<SeriesGroup> displayedSeries;
+  final List<VodProgressEntry> continueWatchingEntries;
+  final Map<String, VodProgressEntry> vodProgressMap;
   final Set<String> favoriteIds;
   final StreamItem? activeItem;
+  final EpgProgramInfo? activeEpg;
   final bool isMiniPipFloating;
   final Widget miniVideoWidget;
   final TextEditingController searchController;
@@ -49,13 +53,17 @@ class MobileDashboardView extends StatelessWidget {
     required this.liveCount,
     required this.movieCount,
     required this.seriesCount,
+    required this.continueWatchingCount,
     required this.favoritesCount,
     required this.recentsCount,
     required this.accountExpDate,
     required this.displayedItems,
     required this.displayedSeries,
+    required this.continueWatchingEntries,
+    required this.vodProgressMap,
     required this.favoriteIds,
     required this.activeItem,
+    required this.activeEpg,
     required this.isMiniPipFloating,
     required this.miniVideoWidget,
     required this.searchController,
@@ -93,7 +101,7 @@ class MobileDashboardView extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(
-                        'Gêneros / Categorias de $sectionTitle (${sectionCategories.length})',
+                        'Gêneros de $sectionTitle (${sectionCategories.length})',
                         style: const TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
@@ -274,7 +282,7 @@ class MobileDashboardView extends StatelessWidget {
                     icon: Icons.live_tv_rounded,
                     selected: activeSection == MainSection.live,
                     onTap: () {
-                      Navigator.pop(context); // Oculta o menu lateral automaticamente
+                      Navigator.pop(context);
                       onSelectSection(MainSection.live);
                     },
                   ),
@@ -299,6 +307,16 @@ class MobileDashboardView extends StatelessWidget {
                     },
                   ),
                   const Divider(color: Colors.white10, height: 24),
+                  _buildDrawerItem(
+                    title: 'Continuar Assistindo',
+                    count: continueWatchingCount,
+                    icon: Icons.play_circle_outline_rounded,
+                    selected: activeSection == MainSection.continueWatching,
+                    onTap: () {
+                      Navigator.pop(context);
+                      onSelectSection(MainSection.continueWatching);
+                    },
+                  ),
                   _buildDrawerItem(
                     title: 'Meus Favoritos',
                     count: favoritesCount,
@@ -423,14 +441,15 @@ class MobileDashboardView extends StatelessWidget {
   Widget build(BuildContext context) {
     final isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
     final isSeriesView = activeSection == MainSection.series;
-    final isMovieView = activeSection == MainSection.movie;
+    final isMovieView = activeSection == MainSection.movie ||
+        activeSection == MainSection.continueWatching;
     final countLabel = isSeriesView
         ? '${displayedSeries.length} séries'
         : '${displayedItems.length} itens';
 
     return Column(
       children: [
-        // 1. CABEÇALHO FLUIDO
+        // 1. TOPO FLUIDO
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: const BoxDecoration(
@@ -487,7 +506,7 @@ class MobileDashboardView extends StatelessWidget {
           ),
         ),
 
-        // 2. MINI PLAYER DE PRÉ-VISUALIZAÇÃO (CLIQUE NOVAMENTE PARA TELA CHEIA)
+        // 2. MINI PLAYER DE PRÉ-VISUALIZAÇÃO + GUIA EPG AO VIVO
         AnimatedSize(
           duration: const Duration(milliseconds: 220),
           curve: Curves.easeOutCubic,
@@ -495,101 +514,151 @@ class MobileDashboardView extends StatelessWidget {
                   !isMiniPipFloating &&
                   !isKeyboardOpen &&
                   !isSeriesView)
-              ? GestureDetector(
-                  onTap: () => onOpenFullScreen(activeItem!),
-                  child: AspectRatio(
-                    aspectRatio: 16 / 9,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        Container(
-                          color: Colors.black,
-                          child: miniVideoWidget,
-                        ),
-                        Positioned(
-                          bottom: 0,
-                          left: 0,
-                          right: 0,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 8),
-                            decoration: const BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.bottomCenter,
-                                end: Alignment.topCenter,
-                                colors: [Colors.black87, Colors.transparent],
+              ? Column(
+                  children: [
+                    GestureDetector(
+                      onTap: () => onOpenFullScreen(activeItem!),
+                      child: AspectRatio(
+                        aspectRatio: 16 / 9,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Container(
+                              color: Colors.black,
+                              child: miniVideoWidget,
+                            ),
+                            Positioned(
+                              bottom: 0,
+                              left: 0,
+                              right: 0,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 8),
+                                decoration: const BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.bottomCenter,
+                                    end: Alignment.topCenter,
+                                    colors: [
+                                      Colors.black87,
+                                      Colors.transparent
+                                    ],
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.circle,
+                                        color: Colors.redAccent, size: 8),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        '${activeItem!.name} (Toque p/ Tela Cheia)',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    InkWell(
+                                      onTap: onEnableMiniPip,
+                                      child: Container(
+                                        padding: const EdgeInsets.all(6),
+                                        decoration: BoxDecoration(
+                                          color: Colors.white12,
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                        ),
+                                        child: const Icon(
+                                            Icons
+                                                .picture_in_picture_alt_rounded,
+                                            color: Color(0xFF00E5FF),
+                                            size: 18),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    InkWell(
+                                      onTap: () =>
+                                          onOpenFullScreen(activeItem!),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 10, vertical: 6),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF00E5FF),
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                        ),
+                                        child: const Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(Icons.fullscreen_rounded,
+                                                color: Colors.black, size: 18),
+                                            SizedBox(width: 4),
+                                            Text(
+                                              'Tela Cheia',
+                                              style: TextStyle(
+                                                color: Colors.black,
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.circle,
-                                    color: Colors.redAccent, size: 8),
-                                const SizedBox(width: 6),
-                                Expanded(
-                                  child: Text(
-                                    '${activeItem!.name} (Toque p/ Tela Cheia)',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                InkWell(
-                                  onTap: onEnableMiniPip,
-                                  child: Container(
-                                    padding: const EdgeInsets.all(6),
-                                    decoration: BoxDecoration(
-                                      color: Colors.white12,
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: const Icon(
-                                        Icons.picture_in_picture_alt_rounded,
-                                        color: Color(0xFF00E5FF),
-                                        size: 18),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                InkWell(
-                                  onTap: () => onOpenFullScreen(activeItem!),
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 10, vertical: 6),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF00E5FF),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: const Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(Icons.fullscreen_rounded,
-                                            color: Colors.black, size: 18),
-                                        SizedBox(width: 4),
-                                        Text(
-                                          'Tela Cheia',
-                                          style: TextStyle(
-                                            color: Colors.black,
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
-                  ),
+                    // FAIXA COMPACTA DE EPG NO CELULAR
+                    if (activeEpg != null &&
+                        activeItem!.type == ContentType.live)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        color: const Color(0xFF101420),
+                        child: Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 5, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF00E5FF).withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text(
+                                'EPG AGORA',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFF00E5FF),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                '${activeEpg!.nowTitle}  •  A seguir: ${activeEpg!.nextTitle}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontSize: 11, color: Colors.white70),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
                 )
               : const SizedBox.shrink(),
         ),
 
-        // 3. BUSCA E FILTRO DE GÊNEROS / CATEGORIAS
+        // 3. BUSCA E FILTRO DE GÊNEROS
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
           child: Row(
@@ -658,7 +727,7 @@ class MobileDashboardView extends StatelessWidget {
           ),
         ),
 
-        // 4. BARRA DESLIZANTE DE GÊNEROS ESTILO STREAMING
+        // 4. BARRA DESLIZANTE DE GÊNEROS
         SizedBox(
           height: 38,
           child: ListView.builder(
@@ -690,10 +759,108 @@ class MobileDashboardView extends StatelessWidget {
         ),
         const SizedBox(height: 6),
 
-        // 5. CONTEÚDO ANIMADO (PÔSTERES DE CINEMA P/ FILMES E SÉRIES OU LISTA DE TV)
+        // 5. CARROSSEL "CONTINUAR ASSISTINDO" (QUANDO EM FILMES/SÉRIES)
+        if ((activeSection == MainSection.movie ||
+                activeSection == MainSection.series) &&
+            selectedCategory == 'Todas' &&
+            searchQuery.isEmpty &&
+            continueWatchingEntries.isNotEmpty)
+          Container(
+            height: 110,
+            margin: const EdgeInsets.only(bottom: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                  child: Text(
+                    '▶ CONTINUAR ASSISTINDO',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF00E5FF),
+                      letterSpacing: 1,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: ListView.builder(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    itemCount: continueWatchingEntries.length,
+                    itemBuilder: (context, idx) {
+                      final entry = continueWatchingEntries[idx];
+                      return GestureDetector(
+                        onTap: () => onOpenFullScreen(entry.item),
+                        child: Container(
+                          width: 210,
+                          margin: const EdgeInsets.only(right: 10, top: 4),
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF141926),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                                color:
+                                    const Color(0xFF00E5FF).withOpacity(0.35)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Row(
+                                children: [
+                                  buildChannelLogo(entry.item.logo, size: 36),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          entry.item.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold),
+                                        ),
+                                        Text(
+                                          entry.formattedRemaining,
+                                          style: const TextStyle(
+                                              fontSize: 10,
+                                              color: Color(0xFF00E5FF)),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const Icon(Icons.play_circle_fill_rounded,
+                                      color: Color(0xFF00E5FF), size: 22),
+                                ],
+                              ),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(4),
+                                child: LinearProgressIndicator(
+                                  value: entry.progress,
+                                  minHeight: 4,
+                                  backgroundColor: Colors.white12,
+                                  color: const Color(0xFF00E5FF),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+        // 6. GRADE OU LISTA PRINCIPAL
         Expanded(
           child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 240),
+            duration: const Duration(milliseconds: 220),
             child: isSeriesView
                 ? _buildSeriesPosterGrid()
                 : isMovieView
@@ -705,7 +872,6 @@ class MobileDashboardView extends StatelessWidget {
     );
   }
 
-  // GRADE DE SÉRIES AGRUPADAS POR CAPA (CADA SÉRIE ABRE SUAS TEMPORADAS E EPISÓDIOS)
   Widget _buildSeriesPosterGrid() {
     if (displayedSeries.isEmpty) {
       return const Center(
@@ -742,18 +908,17 @@ class MobileDashboardView extends StatelessWidget {
     );
   }
 
-  // GRADE DE FILMES COM PÔSTERES VERTICAIS ESTILO STREAMING
   Widget _buildMoviesPosterGrid() {
     if (displayedItems.isEmpty) {
       return const Center(
         key: ValueKey('empty_movies'),
-        child: Text('Nenhum filme encontrado neste gênero.',
+        child: Text('Nenhum conteúdo encontrado nesta seção.',
             style: TextStyle(color: Colors.white54, fontSize: 13)),
       );
     }
 
     return GridView.builder(
-      key: ValueKey('movies_grid_$selectedCategory'),
+      key: ValueKey('movies_grid_${activeSection}_$selectedCategory'),
       padding: const EdgeInsets.all(12),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 3,
@@ -766,16 +931,22 @@ class MobileDashboardView extends StatelessWidget {
         final movie = displayedItems[index];
         final isPlaying = activeItem?.id == movie.id;
         final isFav = favoriteIds.contains(movie.id);
+        final savedProg = vodProgressMap[movie.id];
 
         return GestureDetector(
           onTap: () => onStartPreview(movie),
           child: buildStreamingPosterCard(
             title: movie.name,
-            subtitle: isPlaying ? '▶ Toque p/ Tela Cheia' : movie.group,
+            subtitle: isPlaying
+                ? '▶ Toque p/ Tela Cheia'
+                : savedProg != null
+                    ? savedProg.formattedRemaining
+                    : movie.group,
             logoUrl: movie.logo,
             badgeText: movie.qualityTag,
             isPlaying: isPlaying,
             isFavorite: isFav,
+            progress: savedProg?.progress,
             onFavoriteTap: () => onToggleFavorite(movie),
             onTap: () => onStartPreview(movie),
           ),
@@ -784,7 +955,6 @@ class MobileDashboardView extends StatelessWidget {
     );
   }
 
-  // LISTA DE CANAIS DE TV AO VIVO (1º TOQUE = PREVIEW, 2º TOQUE = TELA CHEIA)
   Widget _buildLiveChannelsList() {
     if (displayedItems.isEmpty) {
       return const Center(
@@ -802,6 +972,7 @@ class MobileDashboardView extends StatelessWidget {
         final item = displayedItems[index];
         final isPlaying = activeItem?.id == item.id;
         final isFav = favoriteIds.contains(item.id);
+        final savedProg = vodProgressMap[item.id];
 
         return AnimatedContainer(
           duration: const Duration(milliseconds: 160),
@@ -837,8 +1008,10 @@ class MobileDashboardView extends StatelessWidget {
                 Expanded(
                   child: Text(
                     isPlaying
-                        ? 'Reproduzindo • Toque novamente p/ Tela Cheia'
-                        : item.group,
+                        ? 'No Ar • Toque novamente p/ Tela Cheia'
+                        : savedProg != null
+                            ? '${savedProg.formattedRemaining} • ${item.group}'
+                            : item.group,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
