@@ -732,6 +732,7 @@ class MainDashboard extends StatefulWidget {
 
 class _MainDashboardState extends State<MainDashboard> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final SharedStreamEngine _engine = SharedStreamEngine.instance;
 
   late DeviceMode currentDeviceMode;
   bool isTVSideMenuOpen = false;
@@ -744,6 +745,7 @@ class _MainDashboardState extends State<MainDashboard> {
 
   List<StreamItem> displayedItems = [];
   List<SeriesGroup> displayedSeries = [];
+  Map<String, VodProgressEntry> vodProgressMap = {};
 
   Map<String, int> categoryCounts = {};
   List<String> sectionCategories = ['Todas'];
@@ -761,11 +763,6 @@ class _MainDashboardState extends State<MainDashboard> {
   double lastMeasuredSpeedMbps = 18.5;
   bool isLoading = true;
   String errorMessage = '';
-
-  StreamItem? activeItem;
-  VideoPlayerController? _previewController;
-  bool isPreviewReady = false;
-  bool isPreviewError = false;
   bool isMiniPipFloating = false;
 
   final TextEditingController _searchController = TextEditingController();
@@ -778,19 +775,51 @@ class _MainDashboardState extends State<MainDashboard> {
     return '${widget.serverDns}/get.php?username=${widget.username}&password=${widget.password}&type=m3u_plus&output=ts';
   }
 
+  List<VodProgressEntry> get sortedContinueWatching {
+    final list = vodProgressMap.values.toList();
+    list.sort((a, b) => b.updatedAtMs.compareTo(a.updatedAtMs));
+    return list;
+  }
+
   @override
   void initState() {
     super.initState();
     currentDeviceMode = widget.deviceMode;
     applyDeviceOrientation(currentDeviceMode);
-    _loadAccountInfoAndPlaylist();
+
+    _engine.addListener(_onEngineUpdated);
+    _engine.onVodProgressSaved = (entry) {
+      if (!mounted) return;
+      setState(() {
+        if (entry.progress >= 0.96) {
+          vodProgressMap.remove(entry.item.id);
+        } else {
+          vodProgressMap[entry.item.id] = entry;
+        }
+        if (activeSection == MainSection.continueWatching) {
+          _rebuildSectionCategories();
+        }
+      });
+    };
+
+    _initSavedProgressAndPlaylist();
   }
 
   @override
   void dispose() {
-    _previewController?.dispose();
+    _engine.removeListener(_onEngineUpdated);
+    _engine.onVodProgressSaved = null;
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onEngineUpdated() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _initSavedProgressAndPlaylist() async {
+    vodProgressMap = await AppStorage.loadVodProgressMap();
+    await _loadAccountInfoAndPlaylist();
   }
 
   Future<void> _switchDeviceMode() async {
@@ -804,7 +833,7 @@ class _MainDashboardState extends State<MainDashboard> {
   }
 
   Future<void> _returnToLoginForEditing({String? errorBanner}) async {
-    _previewController?.pause();
+    await _engine.stopAndClear();
     await AppStorage.clearSession();
     if (!mounted) return;
     Navigator.pushReplacement(
@@ -875,6 +904,13 @@ class _MainDashboardState extends State<MainDashboard> {
               ((bytes * 8) / (seconds * 1000000)).clamp(1.0, 300.0);
         }
 
+        _engine.configureCredentials(
+          dns: widget.serverDns,
+          user: widget.username,
+          pass: widget.password,
+          speedMbps: lastMeasuredSpeedMbps,
+        );
+
         final live = <StreamItem>[];
         final movies = <StreamItem>[];
         final series = <StreamItem>[];
@@ -908,9 +944,9 @@ class _MainDashboardState extends State<MainDashboard> {
           isLoading = false;
         });
 
-        if (live.isNotEmpty && activeItem == null) {
+        if (live.isNotEmpty && _engine.currentItem == null) {
           _startPreview(live.first, forcePreviewOnly: true);
-        } else if (parsed.isNotEmpty && activeItem == null) {
+        } else if (parsed.isNotEmpty && _engine.currentItem == null) {
           _startPreview(parsed.first, forcePreviewOnly: true);
         }
       } else {
@@ -964,6 +1000,8 @@ class _MainDashboardState extends State<MainDashboard> {
         return movieItems;
       case MainSection.series:
         return seriesItems;
+      case MainSection.continueWatching:
+        return sortedContinueWatching.map((e) => e.item).toList();
       case MainSection.favorites:
         return allItems.where((i) => favoriteIds.contains(i.id)).toList();
       case MainSection.recents:
@@ -979,6 +1017,8 @@ class _MainDashboardState extends State<MainDashboard> {
         return 'Filmes';
       case MainSection.series:
         return 'Séries';
+      case MainSection.continueWatching:
+        return 'Continuar Assistindo';
       case MainSection.favorites:
         return 'Meus Favoritos';
       case MainSection.recents:
@@ -992,7 +1032,6 @@ class _MainDashboardState extends State<MainDashboard> {
       selectedCategory = 'Todas';
       searchQuery = '';
       _searchController.clear();
-      // Oculta automaticamente o menu lateral ao selecionar uma seção
       isTVSideMenuOpen = false;
       _rebuildSectionCategories();
     });
@@ -1106,6 +1145,7 @@ class _MainDashboardState extends State<MainDashboard> {
     openSeriesDetailsModal(
       context: context,
       series: series,
+      vodProgressMap: vodProgressMap,
       onPlayEpisode: (episode, fullSeriesPlaylist) {
         _openFullScreen(episode, customPlaylist: fullSeriesPlaylist);
       },
@@ -1197,7 +1237,7 @@ class _MainDashboardState extends State<MainDashboard> {
     return variants.isEmpty ? [item] : variants;
   }
 
-  // 1º CLIQUE = PRÉ-VISUALIZAÇÃO PEQUENA | 2º CLIQUE NO MESMO ITEM = TELA CHEIA
+  // 1º CLIQUE = PRÉ-VISUALIZAÇÃO PEQUENA | 2º CLIQUE = EXPANDE EM TELA CHEIA SEM REINICIAR O FLUXO!
   Future<void> _startPreview(StreamItem item,
       {bool forcePreviewOnly = false}) async {
     if (item.isAdult && !adultUnlocked) {
@@ -1210,42 +1250,50 @@ class _MainDashboardState extends State<MainDashboard> {
 
     _addToRecents(item);
 
-    // Se o canal já está selecionado na pré-visualização, o 2º clique abre em Tela Cheia!
-    if (!forcePreviewOnly && activeItem?.id == item.id) {
+    // Se o canal já está selecionado na pré-visualização, o 2º clique abre em Tela Cheia sem reiniciar!
+    if (!forcePreviewOnly && _engine.currentItem?.id == item.id) {
       _openFullScreen(item);
       return;
     }
 
-    setState(() {
-      activeItem = item;
-      isPreviewReady = false;
-      isPreviewError = false;
-    });
+    final savedEntry = vodProgressMap[item.id];
+    final resumeDur = (savedEntry != null && item.type != ContentType.live)
+        ? Duration(seconds: savedEntry.positionSeconds)
+        : null;
 
-    final old = _previewController;
-    _previewController = VideoPlayerController.networkUrl(
-      Uri.parse(item.url),
-      httpHeaders: kIptvHeaders,
-    );
-    await old?.dispose();
-
-    try {
-      await _previewController!.initialize();
-      if (!mounted) return;
-      setState(() => isPreviewReady = true);
-      _previewController!.play();
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => isPreviewError = true);
-    }
+    await _engine.openStream(item, startPosition: resumeDur);
   }
 
-  void _openFullScreen(StreamItem item, {List<StreamItem>? customPlaylist}) {
-    _addToRecents(item);
-    _previewController?.pause();
+  Future<void> _openFullScreen(StreamItem item,
+      {List<StreamItem>? customPlaylist}) async {
+    if (item.isAdult && !adultUnlocked) {
+      _promptParentalPin(() {
+        adultUnlocked = true;
+        _openFullScreen(item, customPlaylist: customPlaylist);
+      });
+      return;
+    }
 
-    final targetPlaylist =
-        customPlaylist ?? (displayedItems.isNotEmpty ? displayedItems : liveItems);
+    _addToRecents(item);
+
+    Duration? chosenStartPos;
+    final savedEntry = vodProgressMap[item.id];
+
+    // Se for Filme ou Episódio pausado pela metade e ainda não estiver rodando no preview, pergunta se quer continuar
+    if (item.type != ContentType.live &&
+        savedEntry != null &&
+        _engine.currentItem?.id != item.id) {
+      final decision = await showVodResumePrompt(
+        context: context,
+        entry: savedEntry,
+      );
+      if (decision == null) return;
+      chosenStartPos = decision;
+    }
+
+    if (!mounted) return;
+    final targetPlaylist = customPlaylist ??
+        (displayedItems.isNotEmpty ? displayedItems : liveItems);
 
     Navigator.push(
       context,
@@ -1255,17 +1303,14 @@ class _MainDashboardState extends State<MainDashboard> {
           playlist: targetPlaylist,
           liveChannelsPool: liveItems,
           measuredSpeedMbps: lastMeasuredSpeedMbps,
+          initialStartPosition: chosenStartPos,
           onMinimizeToPip: (playingItem) {
             setState(() => isMiniPipFloating = true);
-            _startPreview(playingItem, forcePreviewOnly: true);
+            _engine.openStream(playingItem);
           },
         ),
       ),
-    ).then((_) {
-      if (_previewController != null && isPreviewReady && !isMiniPipFloating) {
-        _previewController!.play();
-      }
-    });
+    );
   }
 
   void _showSpeedTestModal() {
@@ -1273,12 +1318,14 @@ class _MainDashboardState extends State<MainDashboard> {
       context: context,
       builder: (_) => SpeedTestDialog(
         testUrl: m3uUrl,
-        onSpeedMeasured: (mbps) => setState(() => lastMeasuredSpeedMbps = mbps),
+        onSpeedMeasured: (mbps) {
+          setState(() => lastMeasuredSpeedMbps = mbps);
+          _engine.measuredSpeedMbps = mbps;
+        },
       ),
     );
   }
 
-  // BOTÃO VOLTAR REABRE O MENU LATERAL QUANDO ELE ESTÁ OCULTO
   void _handleDashboardBackButton() {
     if (searchQuery.isNotEmpty) {
       setState(() {
@@ -1308,23 +1355,24 @@ class _MainDashboardState extends State<MainDashboard> {
   }
 
   Widget _buildMiniVideoWidget() {
-    if (isPreviewError) {
+    if (_engine.hasError) {
       return const Center(
         child: Text('Sinal indisponível',
             style: TextStyle(fontSize: 11, color: Colors.white54)),
       );
     }
-    if (!isPreviewReady || _previewController == null) {
+    if (!_engine.isReady || _engine.controller == null) {
       return const Center(
         child: CircularProgressIndicator(color: Color(0xFF00E5FF)),
       );
     }
+    final ctrl = _engine.controller!;
     return FittedBox(
       fit: BoxFit.contain,
       child: SizedBox(
-        width: _previewController!.value.size.width,
-        height: _previewController!.value.size.height,
-        child: VideoPlayer(_previewController!),
+        width: ctrl.value.size.width,
+        height: ctrl.value.size.height,
+        child: VideoPlayer(ctrl),
       ),
     );
   }
@@ -1332,6 +1380,9 @@ class _MainDashboardState extends State<MainDashboard> {
   @override
   Widget build(BuildContext context) {
     final isTVMode = currentDeviceMode == DeviceMode.tv;
+    final activeItem = _engine.currentItem;
+    final activeEpg = _engine.currentEpg;
+    final cwEntries = sortedContinueWatching;
 
     final mobileView = MobileDashboardView(
       scaffoldKey: _scaffoldKey,
@@ -1344,13 +1395,17 @@ class _MainDashboardState extends State<MainDashboard> {
       liveCount: liveItems.length,
       movieCount: movieItems.length,
       seriesCount: allSeriesGroups.length,
+      continueWatchingCount: cwEntries.length,
       favoritesCount: favoriteIds.length,
       recentsCount: recentItems.length,
       accountExpDate: accountExpDate,
       displayedItems: displayedItems,
       displayedSeries: displayedSeries,
+      continueWatchingEntries: cwEntries,
+      vodProgressMap: vodProgressMap,
       favoriteIds: favoriteIds,
       activeItem: activeItem,
+      activeEpg: activeEpg,
       isMiniPipFloating: isMiniPipFloating,
       miniVideoWidget: _buildMiniVideoWidget(),
       searchController: _searchController,
@@ -1384,7 +1439,6 @@ class _MainDashboardState extends State<MainDashboard> {
       },
       child: Scaffold(
         key: _scaffoldKey,
-        // Permite abrir o menu lateral no celular arrastando do limite esquerdo da tela
         drawerEdgeDragWidth: 56,
         drawer: isTVMode ? null : mobileView.buildDrawer(context),
         body: SafeArea(
@@ -1410,12 +1464,15 @@ class _MainDashboardState extends State<MainDashboard> {
                               liveCount: liveItems.length,
                               movieCount: movieItems.length,
                               seriesCount: allSeriesGroups.length,
+                              continueWatchingCount: cwEntries.length,
                               favoritesCount: favoriteIds.length,
                               recentsCount: recentItems.length,
                               displayedItems: displayedItems,
                               displayedSeries: displayedSeries,
+                              vodProgressMap: vodProgressMap,
                               favoriteIds: favoriteIds,
                               activeItem: activeItem,
+                              activeEpg: activeEpg,
                               activeQualityVariants:
                                   _findQualityVariants(activeItem),
                               miniVideoWidget: _buildMiniVideoWidget(),
@@ -1480,7 +1537,7 @@ class _MainDashboardState extends State<MainDashboard> {
                               children: [
                                 Expanded(
                                   child: Text(
-                                    activeItem!.name,
+                                    activeItem.name,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
@@ -1494,14 +1551,14 @@ class _MainDashboardState extends State<MainDashboard> {
                                   color: const Color(0xFF00E5FF),
                                   onPressed: () {
                                     setState(() => isMiniPipFloating = false);
-                                    _openFullScreen(activeItem!);
+                                    _openFullScreen(activeItem);
                                   },
                                 ),
                                 TVIconButton(
                                   icon: Icons.close_rounded,
                                   size: 16,
                                   onPressed: () {
-                                    _previewController?.pause();
+                                    _engine.togglePlayPause();
                                     setState(() => isMiniPipFloating = false);
                                   },
                                 ),
@@ -1527,7 +1584,7 @@ class _MainDashboardState extends State<MainDashboard> {
         children: [
           const CircularProgressIndicator(color: Color(0xFF00E5FF)),
           const SizedBox(height: 18),
-          const Text('SINCRONIZANDO CATÁLOGO E SÉRIES...'),
+          const Text('SINCRONIZANDO CATÁLOGO, SÉRIES E EPG...'),
           const SizedBox(height: 20),
           TVFocusableItem(
             autofocus: true,
