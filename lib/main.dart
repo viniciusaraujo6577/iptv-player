@@ -743,6 +743,11 @@ class _MainDashboardState extends State<MainDashboard> {
   List<StreamItem> seriesItems = [];
   List<SeriesGroup> allSeriesGroups = [];
 
+  // Mapas pré-indexados O(1) para troca de categoria em 0ms
+  final Map<String, List<StreamItem>> _liveByGroup = {};
+  final Map<String, List<StreamItem>> _movieByGroup = {};
+  final Map<String, List<SeriesGroup>> _seriesByGroup = {};
+
   List<StreamItem> displayedItems = [];
   List<SeriesGroup> displayedSeries = [];
   Map<String, VodProgressEntry> vodProgressMap = {};
@@ -753,9 +758,10 @@ class _MainDashboardState extends State<MainDashboard> {
   MainSection activeSection = MainSection.live;
   String selectedCategory = 'Todas';
   String searchQuery = '';
+  Timer? _searchDebounce;
 
-  final Set<String> favoriteIds = {};
-  final List<StreamItem> recentItems = [];
+  Set<String> favoriteIds = {};
+  List<StreamItem> recentItems = [];
   String parentalPin = '0000';
   bool adultUnlocked = false;
 
@@ -807,6 +813,7 @@ class _MainDashboardState extends State<MainDashboard> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _engine.removeListener(_onEngineUpdated);
     _engine.onVodProgressSaved = null;
     _searchController.dispose();
@@ -819,7 +826,9 @@ class _MainDashboardState extends State<MainDashboard> {
 
   Future<void> _initSavedProgressAndPlaylist() async {
     vodProgressMap = await AppStorage.loadVodProgressMap();
-    await _loadAccountInfoAndPlaylist();
+    favoriteIds = await AppStorage.loadFavorites();
+    recentItems = await AppStorage.loadRecents();
+    await _loadAccountInfoAndPlaylist(forceNetwork: false);
   }
 
   Future<void> _switchDeviceMode() async {
@@ -853,13 +862,100 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
-  Future<void> _loadAccountInfoAndPlaylist() async {
+  Future<void> _applyParsedPlaylist(String rawM3u,
+      {bool isSilentBackgroundUpdate = false}) async {
+    final parsed = await compute(parseM3UAdvanced, rawM3u);
+    if (parsed.isEmpty) return;
+
+    final live = <StreamItem>[];
+    final movies = <StreamItem>[];
+    final series = <StreamItem>[];
+
+    final liveGroups = <String, List<StreamItem>>{};
+    final movieGroups = <String, List<StreamItem>>{};
+
+    for (final item in parsed) {
+      if (item.type == ContentType.live) {
+        live.add(item);
+        liveGroups.putIfAbsent(item.group, () => []).add(item);
+      } else if (item.type == ContentType.movie) {
+        movies.add(item);
+        movieGroups.putIfAbsent(item.group, () => []).add(item);
+      } else {
+        series.add(item);
+      }
+    }
+
+    final groupedSeries = await compute(groupSeriesItems, series);
+    final seriesGroupsMap = <String, List<SeriesGroup>>{};
+    for (final s in groupedSeries) {
+      seriesGroupsMap.putIfAbsent(s.group, () => []).add(s);
+    }
+
+    if (!mounted) return;
+    setState(() {
+      allItems = parsed;
+      liveItems = live;
+      movieItems = movies;
+      seriesItems = series;
+      allSeriesGroups = groupedSeries;
+
+      _liveByGroup
+        ..clear()
+        ..addAll(liveGroups);
+      _movieByGroup
+        ..clear()
+        ..addAll(movieGroups);
+      _seriesByGroup
+        ..clear()
+        ..addAll(seriesGroupsMap);
+
+      if (!isSilentBackgroundUpdate) {
+        activeSection = live.isNotEmpty
+            ? MainSection.live
+            : movies.isNotEmpty
+                ? MainSection.movie
+                : MainSection.series;
+        isTVSideMenuOpen = false;
+      }
+      _rebuildSectionCategories();
+      isLoading = false;
+    });
+
+    if (!isSilentBackgroundUpdate) {
+      if (live.isNotEmpty && _engine.currentItem == null) {
+        _startPreview(live.first, forcePreviewOnly: true);
+      } else if (parsed.isNotEmpty && _engine.currentItem == null) {
+        _startPreview(parsed.first, forcePreviewOnly: true);
+      }
+    }
+  }
+
+  Future<void> _loadAccountInfoAndPlaylist({bool forceNetwork = false}) async {
+    if (!isDirectM3u) _fetchXtreamAccountStatus();
+
+    _engine.configureCredentials(
+      dns: widget.serverDns,
+      user: widget.username,
+      pass: widget.password,
+      speedMbps: lastMeasuredSpeedMbps,
+    );
+
+    // 1. Tenta carregar do Cache Local para abertura instantânea em 1 segundo
+    if (!forceNetwork) {
+      final cachedM3u = await AppStorage.loadPlaylistCache(m3uUrl);
+      if (cachedM3u != null && cachedM3u.isNotEmpty) {
+        await _applyParsedPlaylist(cachedM3u);
+        // Atualiza silenciosamente em segundo plano sem travar a interface
+        _refreshPlaylistInBackground();
+        return;
+      }
+    }
+
     setState(() {
       isLoading = true;
       errorMessage = '';
     });
-
-    if (!isDirectM3u) _fetchXtreamAccountStatus();
 
     try {
       final stopwatch = Stopwatch()..start();
@@ -870,9 +966,7 @@ class _MainDashboardState extends State<MainDashboard> {
 
       if (response.statusCode == 200) {
         final bodyText = utf8.decode(response.bodyBytes, allowMalformed: true);
-        final parsed = await compute(parseM3UAdvanced, bodyText);
-
-        if (parsed.isEmpty) {
+        if (!bodyText.contains('#EXTINF')) {
           await AppStorage.clearSession();
           if (!mounted) return;
           setState(() {
@@ -902,53 +996,13 @@ class _MainDashboardState extends State<MainDashboard> {
         if (seconds > 0.1 && bytes > 10000) {
           lastMeasuredSpeedMbps =
               ((bytes * 8) / (seconds * 1000000)).clamp(1.0, 300.0);
+          _engine.measuredSpeedMbps = lastMeasuredSpeedMbps;
         }
 
-        _engine.configureCredentials(
-          dns: widget.serverDns,
-          user: widget.username,
-          pass: widget.password,
-          speedMbps: lastMeasuredSpeedMbps,
-        );
+        // Salva no cache permanente para os próximos acessos abrirem instantaneamente
+        AppStorage.savePlaylistCache(m3uUrl, bodyText);
 
-        final live = <StreamItem>[];
-        final movies = <StreamItem>[];
-        final series = <StreamItem>[];
-
-        for (final item in parsed) {
-          if (item.type == ContentType.live) {
-            live.add(item);
-          } else if (item.type == ContentType.movie) {
-            movies.add(item);
-          } else {
-            series.add(item);
-          }
-        }
-
-        final groupedSeries = await compute(groupSeriesItems, series);
-
-        if (!mounted) return;
-        setState(() {
-          allItems = parsed;
-          liveItems = live;
-          movieItems = movies;
-          seriesItems = series;
-          allSeriesGroups = groupedSeries;
-          activeSection = live.isNotEmpty
-              ? MainSection.live
-              : movies.isNotEmpty
-                  ? MainSection.movie
-                  : MainSection.series;
-          isTVSideMenuOpen = false;
-          _rebuildSectionCategories();
-          isLoading = false;
-        });
-
-        if (live.isNotEmpty && _engine.currentItem == null) {
-          _startPreview(live.first, forcePreviewOnly: true);
-        } else if (parsed.isNotEmpty && _engine.currentItem == null) {
-          _startPreview(parsed.first, forcePreviewOnly: true);
-        }
+        await _applyParsedPlaylist(bodyText);
       } else {
         await AppStorage.clearSession();
         if (!mounted) return;
@@ -967,6 +1021,21 @@ class _MainDashboardState extends State<MainDashboard> {
         isLoading = false;
       });
     }
+  }
+
+  Future<void> _refreshPlaylistInBackground() async {
+    try {
+      final response = await http
+          .get(Uri.parse(m3uUrl), headers: kIptvHeaders)
+          .timeout(const Duration(seconds: 35));
+      if (response.statusCode == 200) {
+        final bodyText = utf8.decode(response.bodyBytes, allowMalformed: true);
+        if (bodyText.contains('#EXTINF')) {
+          await AppStorage.savePlaylistCache(m3uUrl, bodyText);
+          await _applyParsedPlaylist(bodyText, isSilentBackgroundUpdate: true);
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> _fetchXtreamAccountStatus() async {
@@ -1003,7 +1072,24 @@ class _MainDashboardState extends State<MainDashboard> {
       case MainSection.continueWatching:
         return sortedContinueWatching.map((e) => e.item).toList();
       case MainSection.favorites:
-        return allItems.where((i) => favoriteIds.contains(i.id)).toList();
+        final favList = <StreamItem>[];
+        final seenIds = <String>{};
+        for (final i in allItems) {
+          if (favoriteIds.contains(i.id)) {
+            favList.add(i);
+            seenIds.add(i.id);
+          }
+        }
+        for (final s in allSeriesGroups) {
+          if (favoriteIds.contains(s.id)) {
+            final firstEp = s.allEpisodesFlat.firstOrNull;
+            if (firstEp != null && !seenIds.contains(firstEp.id)) {
+              favList.add(firstEp);
+              seenIds.add(firstEp.id);
+            }
+          }
+        }
+        return favList;
       case MainSection.recents:
         return recentItems;
     }
@@ -1027,6 +1113,13 @@ class _MainDashboardState extends State<MainDashboard> {
   }
 
   void _selectSection(MainSection section) {
+    // Pausa silenciosamente o áudio da pré-visualização quando entra no catálogo de Séries
+    if (section == MainSection.series) {
+      _engine.pausePreviewSilently();
+    } else if (section == MainSection.live && !isMiniPipFloating) {
+      _engine.resumePreviewSilently();
+    }
+
     setState(() {
       activeSection = section;
       selectedCategory = 'Todas';
@@ -1040,13 +1133,36 @@ class _MainDashboardState extends State<MainDashboard> {
   void _rebuildSectionCategories() {
     if (activeSection == MainSection.series) {
       final Map<String, int> counts = {'Todas': allSeriesGroups.length};
-      for (final s in allSeriesGroups) {
-        counts[s.group] = (counts[s.group] ?? 0) + 1;
-      }
-      final cats = <String>['Todas'];
-      for (final key in counts.keys) {
-        if (key != 'Todas') cats.add(key);
-      }
+      _seriesByGroup.forEach((groupName, list) {
+        counts[groupName] = list.length;
+      });
+      final cats = <String>['Todas', ..._seriesByGroup.keys];
+      if (!cats.contains(selectedCategory)) selectedCategory = 'Todas';
+      categoryCounts = counts;
+      sectionCategories = cats;
+      _applyCategoryAndSearchFilter();
+      return;
+    }
+
+    if (activeSection == MainSection.live) {
+      final Map<String, int> counts = {'Todas': liveItems.length};
+      _liveByGroup.forEach((groupName, list) {
+        counts[groupName] = list.length;
+      });
+      final cats = <String>['Todas', ..._liveByGroup.keys];
+      if (!cats.contains(selectedCategory)) selectedCategory = 'Todas';
+      categoryCounts = counts;
+      sectionCategories = cats;
+      _applyCategoryAndSearchFilter();
+      return;
+    }
+
+    if (activeSection == MainSection.movie) {
+      final Map<String, int> counts = {'Todas': movieItems.length};
+      _movieByGroup.forEach((groupName, list) {
+        counts[groupName] = list.length;
+      });
+      final cats = <String>['Todas', ..._movieByGroup.keys];
       if (!cats.contains(selectedCategory)) selectedCategory = 'Todas';
       categoryCounts = counts;
       sectionCategories = cats;
@@ -1056,16 +1172,13 @@ class _MainDashboardState extends State<MainDashboard> {
 
     final baseList = _getBaseListForSection(activeSection);
     final Map<String, int> counts = {'Todas': baseList.length};
-
     for (final item in baseList) {
       counts[item.group] = (counts[item.group] ?? 0) + 1;
     }
-
-    final cats = <String>['Todas'];
-    for (final key in counts.keys) {
-      if (key != 'Todas') cats.add(key);
-    }
-
+    final cats = <String>[
+      'Todas',
+      ...counts.keys.where((k) => k != 'Todas'),
+    ];
     if (!cats.contains(selectedCategory)) selectedCategory = 'Todas';
 
     categoryCounts = counts;
@@ -1073,11 +1186,12 @@ class _MainDashboardState extends State<MainDashboard> {
     _applyCategoryAndSearchFilter(baseList);
   }
 
+  // Filtro O(1) instantâneo usando os mapas pré-indexados
   void _applyCategoryAndSearchFilter([List<StreamItem>? sourceList]) {
     if (activeSection == MainSection.series) {
       List<SeriesGroup> resSeries = selectedCategory == 'Todas'
           ? allSeriesGroups
-          : allSeriesGroups.where((s) => s.group == selectedCategory).toList();
+          : (_seriesByGroup[selectedCategory] ?? const []);
 
       if (searchQuery.trim().isNotEmpty) {
         final q = searchQuery.toLowerCase();
@@ -1091,11 +1205,21 @@ class _MainDashboardState extends State<MainDashboard> {
       return;
     }
 
-    final baseList = sourceList ?? _getBaseListForSection(activeSection);
-
-    List<StreamItem> result = selectedCategory == 'Todas'
-        ? baseList
-        : baseList.where((i) => i.group == selectedCategory).toList();
+    List<StreamItem> result;
+    if (activeSection == MainSection.live) {
+      result = selectedCategory == 'Todas'
+          ? liveItems
+          : (_liveByGroup[selectedCategory] ?? const []);
+    } else if (activeSection == MainSection.movie) {
+      result = selectedCategory == 'Todas'
+          ? movieItems
+          : (_movieByGroup[selectedCategory] ?? const []);
+    } else {
+      final baseList = sourceList ?? _getBaseListForSection(activeSection);
+      result = selectedCategory == 'Todas'
+          ? baseList
+          : baseList.where((i) => i.group == selectedCategory).toList();
+    }
 
     if (searchQuery.trim().isNotEmpty) {
       final q = searchQuery.toLowerCase();
@@ -1107,6 +1231,15 @@ class _MainDashboardState extends State<MainDashboard> {
     }
 
     setState(() => displayedItems = result);
+  }
+
+  void _onSearchQueryChangedDebounced(String val) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted) return;
+      searchQuery = val;
+      _applyCategoryAndSearchFilter();
+    });
   }
 
   void _onCategoryTap(String category) {
@@ -1146,6 +1279,8 @@ class _MainDashboardState extends State<MainDashboard> {
       context: context,
       series: series,
       vodProgressMap: vodProgressMap,
+      isSeriesFavorite: favoriteIds.contains(series.id),
+      onToggleSeriesFavorite: () => _toggleSeriesFavorite(series),
       onPlayEpisode: (episode, fullSeriesPlaylist) {
         _openFullScreen(episode, customPlaylist: fullSeriesPlaylist);
       },
@@ -1212,6 +1347,7 @@ class _MainDashboardState extends State<MainDashboard> {
     recentItems.removeWhere((r) => r.id == item.id);
     recentItems.insert(0, item);
     if (recentItems.length > 40) recentItems.removeLast();
+    AppStorage.saveRecents(recentItems);
   }
 
   void _toggleFavorite(StreamItem item) {
@@ -1223,6 +1359,19 @@ class _MainDashboardState extends State<MainDashboard> {
       }
       if (activeSection == MainSection.favorites) _rebuildSectionCategories();
     });
+    AppStorage.saveFavorites(favoriteIds);
+  }
+
+  void _toggleSeriesFavorite(SeriesGroup series) {
+    setState(() {
+      if (favoriteIds.contains(series.id)) {
+        favoriteIds.remove(series.id);
+      } else {
+        favoriteIds.add(series.id);
+      }
+      if (activeSection == MainSection.favorites) _rebuildSectionCategories();
+    });
+    AppStorage.saveFavorites(favoriteIds);
   }
 
   List<StreamItem> _findQualityVariants(StreamItem? item) {
@@ -1237,7 +1386,6 @@ class _MainDashboardState extends State<MainDashboard> {
     return variants.isEmpty ? [item] : variants;
   }
 
-  // 1º CLIQUE = PRÉ-VISUALIZAÇÃO PEQUENA | 2º CLIQUE = EXPANDE EM TELA CHEIA SEM REINICIAR O FLUXO!
   Future<void> _startPreview(StreamItem item,
       {bool forcePreviewOnly = false}) async {
     if (item.isAdult && !adultUnlocked) {
@@ -1250,7 +1398,7 @@ class _MainDashboardState extends State<MainDashboard> {
 
     _addToRecents(item);
 
-    // Se o canal já está selecionado na pré-visualização, o 2º clique abre em Tela Cheia sem reiniciar!
+    // 1º Clique = Pré-visualização | 2º Clique = Expande em Tela Cheia sem reiniciar o fluxo
     if (!forcePreviewOnly && _engine.currentItem?.id == item.id) {
       _openFullScreen(item);
       return;
@@ -1279,7 +1427,6 @@ class _MainDashboardState extends State<MainDashboard> {
     Duration? chosenStartPos;
     final savedEntry = vodProgressMap[item.id];
 
-    // Se for Filme ou Episódio pausado pela metade e ainda não estiver rodando no preview, pergunta se quer continuar
     if (item.type != ContentType.live &&
         savedEntry != null &&
         _engine.currentItem?.id != item.id) {
@@ -1304,6 +1451,8 @@ class _MainDashboardState extends State<MainDashboard> {
           liveChannelsPool: liveItems,
           measuredSpeedMbps: lastMeasuredSpeedMbps,
           initialStartPosition: chosenStartPos,
+          favoriteIds: favoriteIds,
+          onToggleFavorite: _toggleFavorite,
           onMinimizeToPip: (playingItem) {
             setState(() => isMiniPipFloating = true);
             _engine.openStream(playingItem);
@@ -1412,11 +1561,9 @@ class _MainDashboardState extends State<MainDashboard> {
       searchQuery: searchQuery,
       onSelectSection: _selectSection,
       onSelectCategory: _onCategoryTap,
-      onSearchChanged: (v) {
-        searchQuery = v;
-        _applyCategoryAndSearchFilter();
-      },
+      onSearchChanged: _onSearchQueryChangedDebounced,
       onClearSearch: () {
+        _searchDebounce?.cancel();
         _searchController.clear();
         searchQuery = '';
         _applyCategoryAndSearchFilter();
@@ -1427,7 +1574,7 @@ class _MainDashboardState extends State<MainDashboard> {
       onToggleFavorite: _toggleFavorite,
       onEnableMiniPip: () => setState(() => isMiniPipFloating = true),
       onOpenSpeedTest: _showSpeedTestModal,
-      onRefreshPlaylist: _loadAccountInfoAndPlaylist,
+      onRefreshPlaylist: () => _loadAccountInfoAndPlaylist(forceNetwork: true),
       onSwitchToTVMode: _switchDeviceMode,
       onLogout: () => _returnToLoginForEditing(),
     );
@@ -1480,11 +1627,9 @@ class _MainDashboardState extends State<MainDashboard> {
                               searchQuery: searchQuery,
                               onSelectSection: _selectSection,
                               onSelectCategory: _onCategoryTap,
-                              onSearchChanged: (v) {
-                                searchQuery = v;
-                                _applyCategoryAndSearchFilter();
-                              },
+                              onSearchChanged: _onSearchQueryChangedDebounced,
                               onClearSearch: () {
+                                _searchDebounce?.cancel();
                                 setState(() {
                                   searchQuery = '';
                                   _searchController.clear();
@@ -1495,8 +1640,11 @@ class _MainDashboardState extends State<MainDashboard> {
                               onOpenFullScreen: _openFullScreen,
                               onSelectSeriesGroup: _onSelectSeriesGroup,
                               onToggleFavorite: _toggleFavorite,
+                              onToggleSeriesFavorite: _toggleSeriesFavorite,
                               onOpenSpeedTest: _showSpeedTestModal,
-                              onRefreshPlaylist: _loadAccountInfoAndPlaylist,
+                              onRefreshPlaylist: () =>
+                                  _loadAccountInfoAndPlaylist(
+                                      forceNetwork: true),
                               onSwitchToMobileMode: _switchDeviceMode,
                               onLogout: () => _returnToLoginForEditing(),
                             )
@@ -1558,7 +1706,7 @@ class _MainDashboardState extends State<MainDashboard> {
                                   icon: Icons.close_rounded,
                                   size: 16,
                                   onPressed: () {
-                                    _engine.togglePlayPause();
+                                    _engine.pausePreviewSilently();
                                     setState(() => isMiniPipFloating = false);
                                   },
                                 ),
@@ -1661,7 +1809,8 @@ class _MainDashboardState extends State<MainDashboard> {
                   ),
                   TVFocusableItem(
                     autoScroll: false,
-                    onSelect: _loadAccountInfoAndPlaylist,
+                    onSelect: () =>
+                        _loadAccountInfoAndPlaylist(forceNetwork: true),
                     builder: (context, isFocused) => Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 16, vertical: 12),
