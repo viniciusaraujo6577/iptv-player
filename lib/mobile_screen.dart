@@ -872,7 +872,7 @@ class MobileDashboardView extends StatelessWidget {
     return GridView.builder(
       key: ValueKey('series_grid_$selectedCategory'),
       padding: const EdgeInsets.all(12),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisExtent(
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 3,
         childAspectRatio: 0.64,
         crossAxisSpacing: 10,
@@ -908,7 +908,7 @@ class MobileDashboardView extends StatelessWidget {
     return GridView.builder(
       key: ValueKey('movies_grid_${activeSection}_$selectedCategory'),
       padding: const EdgeInsets.all(12),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisExtent(
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 3,
         childAspectRatio: 0.64,
         crossAxisSpacing: 10,
