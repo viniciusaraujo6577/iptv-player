@@ -10,6 +10,8 @@ class SmartAdaptivePlayerScreen extends StatefulWidget {
   final List<StreamItem> liveChannelsPool;
   final double measuredSpeedMbps;
   final Duration? initialStartPosition;
+  final Set<String> favoriteIds;
+  final ValueChanged<StreamItem> onToggleFavorite;
   final void Function(StreamItem item) onMinimizeToPip;
 
   const SmartAdaptivePlayerScreen({
@@ -19,6 +21,8 @@ class SmartAdaptivePlayerScreen extends StatefulWidget {
     required this.liveChannelsPool,
     required this.measuredSpeedMbps,
     this.initialStartPosition,
+    required this.favoriteIds,
+    required this.onToggleFavorite,
     required this.onMinimizeToPip,
   });
 
@@ -33,13 +37,20 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
 
   bool showOsd = true;
   bool showQuickChannelDrawer = false;
+  bool showStartupHint = true;
 
   int aspectMode = 0;
   final List<String> aspectLabels = ['Original', 'Esticar', '16:9', '4:3'];
 
   Timer? _hideTimer;
+  Timer? _hintTimer;
   Timer? _sleepTimer;
   int? _sleepMinutesRemaining;
+
+  // Próximo Episódio Automático (Séries)
+  Timer? _nextEpisodeTimer;
+  int? _nextEpisodeCountdown;
+  StreamItem? _upcomingEpisodeItem;
 
   final FocusNode _playPauseFocusNode = FocusNode();
 
@@ -49,13 +60,21 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     currentItem = widget.initialItem;
 
-    // Usa o motor compartilhado: se o canal já está rodando na pré-visualização, NÃO REINICIA!
+    _engine.onVodEpisodeEnded = _triggerAutoPlayNextEpisode;
+
+    // Mantém o fluxo contínuo sem reiniciar se já estiver tocando na pré-visualização
     _engine.openStream(
       currentItem,
       startPosition: widget.initialStartPosition,
     );
 
     _resetOsdTimer();
+
+    // Oculta a legenda discreta de ajuda após 3 segundos
+    _hintTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => showStartupHint = false);
+    });
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && showOsd) {
         _playPauseFocusNode.requestFocus();
@@ -65,25 +84,80 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
 
   @override
   void dispose() {
+    if (_engine.onVodEpisodeEnded == _triggerAutoPlayNextEpisode) {
+      _engine.onVodEpisodeEnded = null;
+    }
     _hideTimer?.cancel();
+    _hintTimer?.cancel();
     _sleepTimer?.cancel();
+    _nextEpisodeTimer?.cancel();
     _playPauseFocusNode.dispose();
-    // NÃO damos dispose no _engine.controller para que o vídeo continue rodando
-    // sem reiniciar ao voltar para o menu principal de canais!
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
   }
 
+  void _cancelAutoPlayNext() {
+    _nextEpisodeTimer?.cancel();
+    if (_nextEpisodeCountdown != null) {
+      setState(() {
+        _nextEpisodeCountdown = null;
+        _upcomingEpisodeItem = null;
+      });
+    }
+  }
+
+  void _triggerAutoPlayNextEpisode() {
+    if (!mounted || currentItem.type != ContentType.series) return;
+    if (_nextEpisodeCountdown != null) return;
+
+    final idx = widget.playlist.indexWhere((i) => i.id == currentItem.id);
+    if (idx == -1 || idx + 1 >= widget.playlist.length) return;
+
+    final nextEp = widget.playlist[idx + 1];
+    setState(() {
+      _upcomingEpisodeItem = nextEp;
+      _nextEpisodeCountdown = 5;
+    });
+
+    _nextEpisodeTimer?.cancel();
+    _nextEpisodeTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_nextEpisodeCountdown != null && _nextEpisodeCountdown! > 1) {
+        setState(() => _nextEpisodeCountdown = _nextEpisodeCountdown! - 1);
+      } else {
+        timer.cancel();
+        final target = _upcomingEpisodeItem;
+        setState(() {
+          _nextEpisodeCountdown = null;
+          _upcomingEpisodeItem = null;
+        });
+        if (target != null) {
+          _switchStream(target);
+        }
+      }
+    });
+  }
+
   void _switchStream(StreamItem item, {bool forceReload = false}) {
+    _cancelAutoPlayNext();
     setState(() {
       currentItem = item;
       showOsd = true;
     });
     _engine.openStream(item, forceReload: forceReload);
     _resetOsdTimer();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && showOsd) {
+        _playPauseFocusNode.requestFocus();
+      }
+    });
   }
 
-  void _showOsdAndFocus() {
+  /// Exibe a interface do player com animação curta de Fade e foca no Play/Pause
+  void _revealOsdWithFade() {
     setState(() => showOsd = true);
     _resetOsdTimer();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -100,13 +174,21 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
     });
   }
 
-  void _stepChannel(int delta) {
+  /// Troca de canal EXCLUSIVAMENTE quando acionada pelos botões de seta na tela ao lado do Play/Pause
+  void _stepChannelByButton(int delta) {
     if (widget.playlist.isEmpty) return;
     final idx = widget.playlist.indexWhere((i) => i.id == currentItem.id);
     if (idx == -1) return;
     final next =
         (idx + delta + widget.playlist.length) % widget.playlist.length;
     _switchStream(widget.playlist[next]);
+  }
+
+  void _recallPreviousChannel() {
+    final prev = _engine.previousChannelItem;
+    if (prev != null && prev.id != currentItem.id) {
+      _switchStream(prev);
+    }
   }
 
   List<StreamItem> _getQualities() {
@@ -235,8 +317,10 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
         final hasError = _engine.hasError;
         final isRecovering = _engine.isRecovering;
         final epg = _engine.currentEpg;
+        final prevChannel = _engine.previousChannelItem;
         final qualities = _getQualities();
         final isVod = currentItem.type != ContentType.live;
+        final isFav = widget.favoriteIds.contains(currentItem.id);
 
         return PopScope(
           canPop: !showQuickChannelDrawer && !showOsd,
@@ -257,61 +341,58 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
                 if (event is KeyDownEvent) {
                   final key = event.logicalKey;
 
+                  // Teclas físicas de Play/Pause dedicadas no controle
                   if (key == LogicalKeyboardKey.mediaPlayPause ||
                       key == LogicalKeyboardKey.mediaPlay ||
                       key == LogicalKeyboardKey.mediaPause) {
                     _engine.togglePlayPause();
-                    _resetOsdTimer();
-                    return KeyEventResult.handled;
-                  }
-                  if (key == LogicalKeyboardKey.channelUp) {
-                    _stepChannel(-1);
-                    return KeyEventResult.handled;
-                  }
-                  if (key == LogicalKeyboardKey.channelDown) {
-                    _stepChannel(1);
+                    _revealOsdWithFade();
                     return KeyEventResult.handled;
                   }
 
+                  // BLOQUEIO ESTRITO: Em hipótese alguma botões Cima/Baixo ou ChannelUp/Down trocam de canal!
+                  if (key == LogicalKeyboardKey.channelUp ||
+                      key == LogicalKeyboardKey.channelDown) {
+                    if (!showOsd) _revealOsdWithFade();
+                    return KeyEventResult.handled;
+                  }
+
+                  // Quando a interface do player está oculta:
                   if (!showQuickChannelDrawer && !showOsd) {
+                    // Botão do meio (OK / Select / Enter) exibe a interface com animação curta de Fade
                     if (key == LogicalKeyboardKey.select ||
                         key == LogicalKeyboardKey.enter ||
                         key == LogicalKeyboardKey.numpadEnter ||
                         key == LogicalKeyboardKey.gameButtonA) {
-                      _showOsdAndFocus();
+                      _revealOsdWithFade();
                       return KeyEventResult.handled;
-                    } else if (key == LogicalKeyboardKey.arrowUp) {
-                      if (!isVod) {
-                        _stepChannel(-1);
-                      } else {
-                        _showOsdAndFocus();
-                      }
+                    }
+                    // Setas Cima e Baixo NUNCA trocam de canal: apenas revelam a interface com fade
+                    if (key == LogicalKeyboardKey.arrowUp ||
+                        key == LogicalKeyboardKey.arrowDown) {
+                      _revealOsdWithFade();
                       return KeyEventResult.handled;
-                    } else if (key == LogicalKeyboardKey.arrowDown) {
-                      if (!isVod) {
-                        _stepChannel(1);
-                      } else {
-                        _showOsdAndFocus();
-                      }
-                      return KeyEventResult.handled;
-                    } else if (key == LogicalKeyboardKey.arrowLeft) {
+                    }
+                    // Seta Esquerda: abre a gaveta lateral em TV ao Vivo ou volta 10s em Filmes/Séries
+                    if (key == LogicalKeyboardKey.arrowLeft) {
                       if (isVod) {
                         _engine.seekRelative(-10);
-                        _showOsdAndFocus();
+                        _revealOsdWithFade();
                       } else {
                         setState(() => showQuickChannelDrawer = true);
                       }
                       return KeyEventResult.handled;
-                    } else if (key == LogicalKeyboardKey.arrowRight) {
+                    }
+                    // Seta Direita: avança 10s em Filmes/Séries ou revela o OSD em TV ao Vivo
+                    if (key == LogicalKeyboardKey.arrowRight) {
                       if (isVod) {
                         _engine.seekRelative(10);
-                        _showOsdAndFocus();
-                      } else {
-                        _showOsdAndFocus();
                       }
+                      _revealOsdWithFade();
                       return KeyEventResult.handled;
                     }
                   } else {
+                    // Quando a interface já está visível, mantém o timer ativo enquanto o usuário navega pelas setas
                     _resetOsdTimer();
                   }
                 }
@@ -325,7 +406,7 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
                   } else if (showOsd) {
                     setState(() => showOsd = false);
                   } else {
-                    _showOsdAndFocus();
+                    _revealOsdWithFade();
                   }
                 },
                 child: Stack(
@@ -403,419 +484,668 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
                                     strokeWidth: 2, color: Color(0xFF00E5FF)),
                               ),
                               SizedBox(width: 8),
-                              Text('Sincronizando transmissão ao vivo...',
+                              Text('Estabilizando sinal ao vivo...',
                                   style: TextStyle(fontSize: 11)),
                             ],
                           ),
                         ),
                       ),
 
-                    // 3. CONTROLES OSD COMPLETOS + GUIA EPG AO VIVO
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 200),
-                      child: !showOsd
-                          ? const SizedBox.shrink()
-                          : Container(
-                              key: const ValueKey('osd_controls'),
-                              decoration: const BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [
-                                    Colors.black87,
-                                    Colors.transparent,
-                                    Colors.transparent,
-                                    Colors.black87,
-                                  ],
-                                ),
+                    // 3. LEGENDA DISCRETA DE AJUDA AO ABRIR O PLAYER (SOME SOZINHA EM 3S)
+                    Positioned(
+                      top: 22,
+                      left: 0,
+                      right: 0,
+                      child: IgnorePointer(
+                        child: AnimatedOpacity(
+                          opacity: (showStartupHint && !showOsd) ? 1.0 : 0.0,
+                          duration: const Duration(milliseconds: 220),
+                          child: Center(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 14, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: Colors.black87,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: Colors.white12),
                               ),
-                              padding: const EdgeInsets.all(16),
-                              child: Column(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
-                                children: [
-                                  // TOPO: VOLTAR AO CATÁLOGO (SEM PARAR O VÍDEO!), GAVETA, SLEEP E PIP
-                                  Row(
-                                    children: [
-                                      TVIconButton(
-                                        icon: Icons.arrow_back_ios_new_rounded,
-                                        tooltip:
-                                            'Voltar aos canais mantendo o vídeo',
-                                        onPressed: () => Navigator.pop(context),
-                                      ),
-                                      TVIconButton(
-                                        icon: Icons.menu_open_rounded,
-                                        color: const Color(0xFF00E5FF),
-                                        tooltip: 'Gaveta Rápida de Canais',
-                                        onPressed: () => setState(() =>
-                                            showQuickChannelDrawer =
-                                                !showQuickChannelDrawer),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              currentItem.name,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(
-                                                  fontSize: 16,
-                                                  fontWeight: FontWeight.bold),
-                                            ),
-                                            Text(
-                                              currentItem.group,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(
-                                                  fontSize: 11,
-                                                  color: Color(0xFF00E5FF)),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      if (_sleepMinutesRemaining != null)
-                                        Padding(
-                                          padding:
-                                              const EdgeInsets.only(right: 6),
-                                          child: Container(
-                                            padding: const EdgeInsets.symmetric(
-                                                horizontal: 8, vertical: 4),
-                                            decoration: BoxDecoration(
-                                              color:
-                                                  Colors.amber.withOpacity(0.2),
-                                              borderRadius:
-                                                  BorderRadius.circular(8),
-                                            ),
-                                            child: Text(
-                                              'Sleep: ${_sleepMinutesRemaining}m',
-                                              style: const TextStyle(
-                                                  fontSize: 10,
-                                                  color: Colors.amber,
-                                                  fontWeight: FontWeight.bold),
-                                            ),
-                                          ),
-                                        ),
-                                      TVIconButton(
-                                        icon: Icons.bedtime_outlined,
-                                        tooltip: 'Timer de Sono',
-                                        onPressed: _openSleepTimerModal,
-                                      ),
-                                      const SizedBox(width: 4),
-                                      TVFocusableItem(
-                                        autoScroll: false,
-                                        onSelect: () {
-                                          setState(() => aspectMode =
-                                              (aspectMode + 1) %
-                                                  aspectLabels.length);
-                                        },
-                                        builder: (context, isFocused) =>
-                                            Container(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 10, vertical: 6),
-                                          decoration: BoxDecoration(
-                                            color: isFocused
-                                                ? const Color(0xFF00E5FF)
-                                                : Colors.white12,
-                                            borderRadius:
-                                                BorderRadius.circular(8),
-                                            border: Border.all(
-                                              color: isFocused
-                                                  ? Colors.white
-                                                  : Colors.white24,
-                                            ),
-                                          ),
-                                          child: Text(
-                                            aspectLabels[aspectMode],
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.bold,
-                                              color: isFocused
-                                                  ? Colors.black
-                                                  : Colors.white,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      TVIconButton(
-                                        icon: Icons
-                                            .picture_in_picture_alt_rounded,
-                                        color: const Color(0xFF00E5FF),
-                                        tooltip: 'Minimizar em PiP',
-                                        onPressed: () {
-                                          Navigator.pop(context);
-                                          widget.onMinimizeToPip(currentItem);
-                                        },
-                                      ),
-                                    ],
-                                  ),
+                              child: const Text(
+                                'Aperte OK no controle para abrir os controles do Player • ◄ Lista Rápida',
+                                style: TextStyle(
+                                    fontSize: 11, color: Colors.white70),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
 
-                                  // RODAPÉ: BARRA DE PROGRAMAÇÃO EPG + CONTROLES E SELETOR DE QUALIDADE
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 16, vertical: 12),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF10131D)
-                                          .withOpacity(0.94),
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(color: Colors.white12),
-                                    ),
+                    // 4. INTERFACE DO PLAYER COM ANIMAÇÃO CURTA DE FADE (180ms)
+                    IgnorePointer(
+                      ignoring: !showOsd,
+                      child: AnimatedOpacity(
+                        opacity: showOsd ? 1.0 : 0.0,
+                        duration: const Duration(milliseconds: 180),
+                        curve: Curves.easeOutCubic,
+                        child: Container(
+                          decoration: const BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.black87,
+                                Colors.transparent,
+                                Colors.transparent,
+                                Colors.black87,
+                              ],
+                            ),
+                          ),
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              // TOPO DO PLAYER
+                              Row(
+                                children: [
+                                  TVIconButton(
+                                    icon: Icons.arrow_back_ios_new_rounded,
+                                    tooltip: 'Voltar ao catálogo mantendo vídeo',
+                                    onPressed: () => Navigator.pop(context),
+                                  ),
+                                  TVIconButton(
+                                    icon: Icons.menu_open_rounded,
+                                    color: const Color(0xFF00E5FF),
+                                    tooltip: 'Gaveta Rápida de Canais',
+                                    onPressed: () => setState(() =>
+                                        showQuickChannelDrawer =
+                                            !showQuickChannelDrawer),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
                                     child: Column(
-                                      mainAxisSize: MainAxisSize.min,
                                       crossAxisAlignment:
                                           CrossAxisAlignment.start,
                                       children: [
-                                        // GUIA EPG (PARA CANAIS AO VIVO)
-                                        if (!isVod && epg != null) ...[
-                                          Row(
-                                            children: [
-                                              Container(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                        horizontal: 6,
-                                                        vertical: 2),
-                                                decoration: BoxDecoration(
-                                                  color: Colors.redAccent,
-                                                  borderRadius:
-                                                      BorderRadius.circular(4),
-                                                ),
-                                                child: const Text(
-                                                  'AGORA',
-                                                  style: TextStyle(
-                                                    fontSize: 9,
-                                                    fontWeight: FontWeight.w900,
-                                                  ),
-                                                ),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              Expanded(
-                                                child: Text(
-                                                  epg.nowTitle,
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                  style: const TextStyle(
-                                                    fontSize: 12,
-                                                    fontWeight: FontWeight.bold,
-                                                    color: Colors.white,
-                                                  ),
-                                                ),
-                                              ),
-                                              const SizedBox(width: 12),
-                                              Flexible(
-                                                child: Text(
-                                                  'A Seguir: ${epg.nextTitle}',
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                  style: const TextStyle(
-                                                    fontSize: 11,
-                                                    color: Color(0xFF00E5FF),
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                          const SizedBox(height: 8),
-                                        ],
-
-                                        // BARRA DE TEMPO (PARA FILMES E SÉRIES)
-                                        if (isVod && isReady)
-                                          Padding(
-                                            padding: const EdgeInsets.only(
-                                                bottom: 8.0),
-                                            child: Column(
-                                              children: [
-                                                VideoProgressIndicator(
-                                                  ctrl,
-                                                  allowScrubbing: true,
-                                                  colors:
-                                                      const VideoProgressColors(
-                                                    playedColor:
-                                                        Color(0xFF00E5FF),
-                                                    bufferedColor:
-                                                        Colors.white24,
-                                                    backgroundColor:
-                                                        Colors.white10,
-                                                  ),
-                                                ),
-                                                const SizedBox(height: 4),
-                                                Row(
-                                                  mainAxisAlignment:
-                                                      MainAxisAlignment
-                                                          .spaceBetween,
-                                                  children: [
-                                                    Text(
-                                                      _formatDuration(ctrl
-                                                          .value.position),
-                                                      style: const TextStyle(
-                                                          fontSize: 10,
-                                                          color:
-                                                              Colors.white70),
-                                                    ),
-                                                    Text(
-                                                      _formatDuration(ctrl
-                                                          .value.duration),
-                                                      style: const TextStyle(
-                                                          fontSize: 10,
-                                                          color:
-                                                              Colors.white70),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-
-                                        // BOTÕES DE CONTROLE E QUALIDADES
-                                        Row(
-                                          children: [
-                                            TVIconButton(
-                                              icon: Icons.skip_previous_rounded,
-                                              onPressed: () => _stepChannel(-1),
-                                            ),
-                                            if (isVod)
-                                              TVIconButton(
-                                                icon: Icons.replay_10_rounded,
-                                                onPressed: () =>
-                                                    _engine.seekRelative(-10),
-                                              ),
-                                            TVFocusableItem(
-                                              focusNode: _playPauseFocusNode,
-                                              autofocus: true,
-                                              autoScroll: false,
-                                              onSelect: () {
-                                                _engine.togglePlayPause();
-                                                _resetOsdTimer();
-                                              },
-                                              builder: (context, isFocused) =>
-                                                  AnimatedScale(
-                                                scale: isFocused ? 1.15 : 1.0,
-                                                duration: const Duration(
-                                                    milliseconds: 120),
-                                                child: Container(
-                                                  margin: const EdgeInsets
-                                                      .symmetric(horizontal: 4),
-                                                  padding:
-                                                      const EdgeInsets.all(6),
-                                                  decoration: BoxDecoration(
-                                                    color: isFocused
-                                                        ? const Color(
-                                                                0xFF00E5FF)
-                                                            .withOpacity(0.25)
-                                                        : Colors.transparent,
-                                                    shape: BoxShape.circle,
-                                                    border: Border.all(
-                                                      color: isFocused
-                                                          ? const Color(
-                                                              0xFF00E5FF)
-                                                          : Colors.transparent,
-                                                      width: 2,
-                                                    ),
-                                                  ),
-                                                  child: Icon(
-                                                    isReady &&
-                                                            ctrl.value.isPlaying
-                                                        ? Icons
-                                                            .pause_circle_filled_rounded
-                                                        : Icons
-                                                            .play_circle_fill_rounded,
-                                                    color:
-                                                        const Color(0xFF00E5FF),
-                                                    size: 34,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                            if (isVod)
-                                              TVIconButton(
-                                                icon: Icons.forward_10_rounded,
-                                                onPressed: () =>
-                                                    _engine.seekRelative(10),
-                                              ),
-                                            TVIconButton(
-                                              icon: Icons.skip_next_rounded,
-                                              onPressed: () => _stepChannel(1),
-                                            ),
-                                            const SizedBox(width: 8),
-                                            Expanded(
-                                              child: SingleChildScrollView(
-                                                scrollDirection:
-                                                    Axis.horizontal,
-                                                child: Row(
-                                                  children: qualities.map((q) {
-                                                    final isCurrent =
-                                                        q.id == currentItem.id;
-                                                    return Padding(
-                                                      padding:
-                                                          const EdgeInsets.only(
-                                                              right: 6),
-                                                      child: TVFocusableItem(
-                                                        autoScroll: false,
-                                                        onSelect: () =>
-                                                            _switchStream(q),
-                                                        builder: (context,
-                                                                isFocused) =>
-                                                            Container(
-                                                          padding:
-                                                              const EdgeInsets
-                                                                  .symmetric(
-                                                                  horizontal:
-                                                                      10,
-                                                                  vertical: 5),
-                                                          decoration:
-                                                              BoxDecoration(
-                                                            color: isCurrent
-                                                                ? const Color(
-                                                                    0xFF00E5FF)
-                                                                : Colors
-                                                                    .white12,
-                                                            borderRadius:
-                                                                BorderRadius
-                                                                    .circular(
-                                                                        6),
-                                                            border: Border.all(
-                                                              color: isFocused
-                                                                  ? Colors.white
-                                                                  : Colors
-                                                                      .transparent,
-                                                              width: 1.5,
-                                                            ),
-                                                          ),
-                                                          child: Text(
-                                                            q.qualityTag,
-                                                            style: TextStyle(
-                                                              fontSize: 10,
-                                                              fontWeight:
-                                                                  FontWeight
-                                                                      .bold,
-                                                              color: isCurrent
-                                                                  ? Colors.black
-                                                                  : Colors
-                                                                      .white,
-                                                            ),
-                                                          ),
-                                                        ),
-                                                      ),
-                                                    );
-                                                  }).toList(),
-                                                ),
-                                              ),
-                                            ),
-                                          ],
+                                        Text(
+                                          currentItem.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.bold),
+                                        ),
+                                        Text(
+                                          currentItem.group,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                              fontSize: 11,
+                                              color: Color(0xFF00E5FF)),
                                         ),
                                       ],
                                     ),
                                   ),
+                                  // Botão de Favoritar dentro do Player
+                                  TVIconButton(
+                                    icon: isFav
+                                        ? Icons.star_rounded
+                                        : Icons.star_border_rounded,
+                                    color: isFav ? Colors.amber : Colors.white70,
+                                    tooltip: 'Favoritar / Desfavoritar',
+                                    onPressed: () {
+                                      widget.onToggleFavorite(currentItem);
+                                      setState(() {});
+                                    },
+                                  ),
+                                  const SizedBox(width: 4),
+                                  if (_sleepMinutesRemaining != null)
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 6),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 8, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: Colors.amber.withOpacity(0.2),
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                        ),
+                                        child: Text(
+                                          '${_sleepMinutesRemaining}m',
+                                          style: const TextStyle(
+                                              fontSize: 10,
+                                              color: Colors.amber,
+                                              fontWeight: FontWeight.bold),
+                                        ),
+                                      ),
+                                    ),
+                                  TVIconButton(
+                                    icon: Icons.bedtime_outlined,
+                                    tooltip: 'Timer de Sono',
+                                    onPressed: _openSleepTimerModal,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  TVFocusableItem(
+                                    autoScroll: false,
+                                    onSelect: () {
+                                      setState(() => aspectMode =
+                                          (aspectMode + 1) %
+                                              aspectLabels.length);
+                                    },
+                                    builder: (context, isFocused) => Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 10, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: isFocused
+                                            ? const Color(0xFF00E5FF)
+                                            : Colors.white12,
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                          color: isFocused
+                                              ? Colors.white
+                                              : Colors.white24,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        aspectLabels[aspectMode],
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                          color: isFocused
+                                              ? Colors.black
+                                              : Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  TVIconButton(
+                                    icon:
+                                        Icons.picture_in_picture_alt_rounded,
+                                    color: const Color(0xFF00E5FF),
+                                    tooltip: 'Minimizar em PiP',
+                                    onPressed: () {
+                                      Navigator.pop(context);
+                                      widget.onMinimizeToPip(currentItem);
+                                    },
+                                  ),
                                 ],
                               ),
-                            ),
+
+                              // RODAPÉ DO PLAYER: EPG + BOTÕES DE SETA (ÚNICO LUGAR QUE TROCA DE CANAL)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 16, vertical: 12),
+                                decoration: BoxDecoration(
+                                  color:
+                                      const Color(0xFF10131D).withOpacity(0.94),
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(color: Colors.white12),
+                                ),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    // GUIA EPG AO VIVO
+                                    if (!isVod && epg != null) ...[
+                                      Row(
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 6, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: Colors.redAccent,
+                                              borderRadius:
+                                                  BorderRadius.circular(4),
+                                            ),
+                                            child: const Text(
+                                              'AGORA',
+                                              style: TextStyle(
+                                                fontSize: 9,
+                                                fontWeight: FontWeight.w900,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              epg.nowTitle,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.white,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Flexible(
+                                            child: Text(
+                                              'A Seguir: ${epg.nextTitle}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontSize: 11,
+                                                color: Color(0xFF00E5FF),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                    ],
+
+                                    // BARRA DE TEMPO (FILMES E SÉRIES)
+                                    if (isVod && isReady)
+                                      Padding(
+                                        padding:
+                                            const EdgeInsets.only(bottom: 8.0),
+                                        child: Column(
+                                          children: [
+                                            VideoProgressIndicator(
+                                              ctrl,
+                                              allowScrubbing: true,
+                                              colors: const VideoProgressColors(
+                                                playedColor: Color(0xFF00E5FF),
+                                                bufferedColor: Colors.white24,
+                                                backgroundColor: Colors.white10,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Row(
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment
+                                                      .spaceBetween,
+                                              children: [
+                                                Text(
+                                                  _formatDuration(
+                                                      ctrl.value.position),
+                                                  style: const TextStyle(
+                                                      fontSize: 10,
+                                                      color: Colors.white70),
+                                                ),
+                                                Text(
+                                                  _formatDuration(
+                                                      ctrl.value.duration),
+                                                  style: const TextStyle(
+                                                      fontSize: 10,
+                                                      color: Colors.white70),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+
+                                    // LINHA PRINCIPAL: SETA ANTERIOR | PLAY/PAUSE | SETA PRÓXIMO + RECALL + QUALIDADES
+                                    Row(
+                                      children: [
+                                        // Botão de Seta Esquerda (Canal Anterior) ao lado do Play/Pause
+                                        TVFocusableItem(
+                                          autoScroll: false,
+                                          onSelect: () =>
+                                              _stepChannelByButton(-1),
+                                          builder: (context, isFocused) =>
+                                              AnimatedScale(
+                                            scale: isFocused ? 1.14 : 1.0,
+                                            duration: const Duration(
+                                                milliseconds: 110),
+                                            child: Container(
+                                              padding: const EdgeInsets.all(8),
+                                              decoration: BoxDecoration(
+                                                color: isFocused
+                                                    ? const Color(0xFF00E5FF)
+                                                    : Colors.white10,
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                                border: Border.all(
+                                                  color: isFocused
+                                                      ? Colors.white
+                                                      : Colors.white12,
+                                                  width: 1.5,
+                                                ),
+                                              ),
+                                              child: Icon(
+                                                Icons.skip_previous_rounded,
+                                                color: isFocused
+                                                    ? Colors.black
+                                                    : Colors.white,
+                                                size: 22,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+
+                                        if (isVod) ...[
+                                          TVIconButton(
+                                            icon: Icons.replay_10_rounded,
+                                            tooltip: 'Voltar 10s',
+                                            onPressed: () =>
+                                                _engine.seekRelative(-10),
+                                          ),
+                                          const SizedBox(width: 4),
+                                        ],
+
+                                        // Botão Central de Play / Pause
+                                        TVFocusableItem(
+                                          focusNode: _playPauseFocusNode,
+                                          autofocus: true,
+                                          autoScroll: false,
+                                          onSelect: () {
+                                            _engine.togglePlayPause();
+                                            _resetOsdTimer();
+                                          },
+                                          builder: (context, isFocused) =>
+                                              AnimatedScale(
+                                            scale: isFocused ? 1.15 : 1.0,
+                                            duration: const Duration(
+                                                milliseconds: 110),
+                                            child: Container(
+                                              padding: const EdgeInsets.all(6),
+                                              decoration: BoxDecoration(
+                                                color: isFocused
+                                                    ? const Color(0xFF00E5FF)
+                                                        .withOpacity(0.25)
+                                                    : Colors.transparent,
+                                                shape: BoxShape.circle,
+                                                border: Border.all(
+                                                  color: isFocused
+                                                      ? const Color(0xFF00E5FF)
+                                                      : Colors.transparent,
+                                                  width: 2,
+                                                ),
+                                              ),
+                                              child: Icon(
+                                                isReady && ctrl.value.isPlaying
+                                                    ? Icons
+                                                        .pause_circle_filled_rounded
+                                                    : Icons
+                                                        .play_circle_fill_rounded,
+                                                color: const Color(0xFF00E5FF),
+                                                size: 36,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+
+                                        if (isVod) ...[
+                                          const SizedBox(width: 4),
+                                          TVIconButton(
+                                            icon: Icons.forward_10_rounded,
+                                            tooltip: 'Avançar 10s',
+                                            onPressed: () =>
+                                                _engine.seekRelative(10),
+                                          ),
+                                        ],
+
+                                        const SizedBox(width: 6),
+                                        // Botão de Seta Direita (Próximo Canal) ao lado do Play/Pause
+                                        TVFocusableItem(
+                                          autoScroll: false,
+                                          onSelect: () =>
+                                              _stepChannelByButton(1),
+                                          builder: (context, isFocused) =>
+                                              AnimatedScale(
+                                            scale: isFocused ? 1.14 : 1.0,
+                                            duration: const Duration(
+                                                milliseconds: 110),
+                                            child: Container(
+                                              padding: const EdgeInsets.all(8),
+                                              decoration: BoxDecoration(
+                                                color: isFocused
+                                                    ? const Color(0xFF00E5FF)
+                                                    : Colors.white10,
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                                border: Border.all(
+                                                  color: isFocused
+                                                      ? Colors.white
+                                                      : Colors.white12,
+                                                  width: 1.5,
+                                                ),
+                                              ),
+                                              child: Icon(
+                                                Icons.skip_next_rounded,
+                                                color: isFocused
+                                                    ? Colors.black
+                                                    : Colors.white,
+                                                size: 22,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+
+                                        // Botão "Último Canal" (Recall) para alternar rápido entre 2 canais
+                                        if (!isVod &&
+                                            prevChannel != null &&
+                                            prevChannel.id !=
+                                                currentItem.id) ...[
+                                          const SizedBox(width: 10),
+                                          TVFocusableItem(
+                                            autoScroll: false,
+                                            onSelect: _recallPreviousChannel,
+                                            builder: (context, isFocused) =>
+                                                Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 10,
+                                                      vertical: 6),
+                                              decoration: BoxDecoration(
+                                                color: isFocused
+                                                    ? const Color(0xFF00E5FF)
+                                                    : const Color(0xFF172238),
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                border: Border.all(
+                                                  color: isFocused
+                                                      ? Colors.white
+                                                      : const Color(0xFF00E5FF)
+                                                          .withOpacity(0.4),
+                                                ),
+                                              ),
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Icon(
+                                                    Icons.swap_horiz_rounded,
+                                                    size: 14,
+                                                    color: isFocused
+                                                        ? Colors.black
+                                                        : const Color(
+                                                            0xFF00E5FF),
+                                                  ),
+                                                  const SizedBox(width: 4),
+                                                  Text(
+                                                    'Último Canal',
+                                                    style: TextStyle(
+                                                      fontSize: 10,
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                      color: isFocused
+                                                          ? Colors.black
+                                                          : Colors.white,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+
+                                        const SizedBox(width: 10),
+                                        // Seletor Rápido de Qualidade (SD / HD / FHD / 4K)
+                                        Expanded(
+                                          child: SingleChildScrollView(
+                                            scrollDirection: Axis.horizontal,
+                                            child: Row(
+                                              children: qualities.map((q) {
+                                                final isCurrent =
+                                                    q.id == currentItem.id;
+                                                return Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                          right: 6),
+                                                  child: TVFocusableItem(
+                                                    autoScroll: false,
+                                                    onSelect: () =>
+                                                        _switchStream(q),
+                                                    builder: (context,
+                                                            isFocused) =>
+                                                        Container(
+                                                      padding: const EdgeInsets
+                                                          .symmetric(
+                                                          horizontal: 10,
+                                                          vertical: 5),
+                                                      decoration: BoxDecoration(
+                                                        color: isCurrent
+                                                            ? const Color(
+                                                                0xFF00E5FF)
+                                                            : Colors.white12,
+                                                        borderRadius:
+                                                            BorderRadius
+                                                                .circular(6),
+                                                        border: Border.all(
+                                                          color: isFocused
+                                                              ? Colors.white
+                                                              : Colors
+                                                                  .transparent,
+                                                          width: 1.5,
+                                                        ),
+                                                      ),
+                                                      child: Text(
+                                                        q.qualityTag,
+                                                        style: TextStyle(
+                                                          fontSize: 10,
+                                                          fontWeight:
+                                                              FontWeight.bold,
+                                                          color: isCurrent
+                                                              ? Colors.black
+                                                              : Colors.white,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                );
+                                              }).toList(),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                     ),
 
-                    // 4. GAVETA TRANSPARENTE DE CANAIS (NAVEGAÇÃO SEM REINICIAR O VÍDEO ATUAL)
+                    // 5. CARD FLUTUANTE DE "PRÓXIMO EPISÓDIO AUTOMÁTICO" (EM SÉRIES)
+                    if (_nextEpisodeCountdown != null &&
+                        _upcomingEpisodeItem != null)
+                      Positioned(
+                        bottom: 95,
+                        right: 24,
+                        child: Container(
+                          width: 300,
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF101420).withOpacity(0.96),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                                color: const Color(0xFF00E5FF), width: 1.5),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.7),
+                                blurRadius: 20,
+                              )
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'PRÓXIMO EPISÓDIO EM ${_nextEpisodeCountdown}s...',
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w900,
+                                  color: Color(0xFF00E5FF),
+                                  letterSpacing: 1,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                _upcomingEpisodeItem!.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontSize: 13, fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(height: 10),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  TVFocusableItem(
+                                    autoScroll: false,
+                                    onSelect: _cancelAutoPlayNext,
+                                    builder: (context, isFocused) => Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 10, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                          color: isFocused
+                                              ? Colors.white
+                                              : Colors.white24,
+                                        ),
+                                      ),
+                                      child: const Text('Cancelar',
+                                          style: TextStyle(fontSize: 11)),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  TVFocusableItem(
+                                    autofocus: true,
+                                    autoScroll: false,
+                                    onSelect: () {
+                                      final target = _upcomingEpisodeItem!;
+                                      _cancelAutoPlayNext();
+                                      _switchStream(target);
+                                    },
+                                    builder: (context, isFocused) => Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF00E5FF),
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                          color: isFocused
+                                              ? Colors.white
+                                              : Colors.transparent,
+                                          width: 1.5,
+                                        ),
+                                      ),
+                                      child: const Text(
+                                        'Assistir Agora',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.black,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                    // 6. GAVETA LATERAL DE CANAIS / EPISÓDIOS
                     AnimatedPositioned(
                       duration: const Duration(milliseconds: 220),
                       curve: Curves.easeOutCubic,
@@ -824,7 +1154,7 @@ class _SmartAdaptivePlayerScreenState extends State<SmartAdaptivePlayerScreen> {
                       left: showQuickChannelDrawer ? 0 : -290,
                       width: 280,
                       child: Container(
-                        color: const Color(0xFF08090E).withOpacity(0.94),
+                        color: const Color(0xFF08090E).withOpacity(0.95),
                         child: Column(
                           children: [
                             Padding(
