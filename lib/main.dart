@@ -77,15 +77,15 @@ class _StartupRouterScreenState extends State<StartupRouterScreen> {
     if (savedMode == null) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => const DeviceSelectionScreen()),
+        createSmoothRoute(const DeviceSelectionScreen()),
       );
     } else {
       await applyDeviceOrientation(savedMode);
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(
-          builder: (_) => LoginGatewayScreen(
+        createSmoothRoute(
+          LoginGatewayScreen(
             deviceMode: savedMode,
             allowAutoLogin: true,
           ),
@@ -112,8 +112,8 @@ class DeviceSelectionScreen extends StatelessWidget {
 
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(
-        builder: (_) => LoginGatewayScreen(
+      createSmoothRoute(
+        LoginGatewayScreen(
           deviceMode: mode,
           allowAutoLogin: true,
         ),
@@ -413,8 +413,8 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
   }) {
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(
-        builder: (_) => MainDashboard(
+      createSmoothRoute(
+        MainDashboard(
           deviceMode: widget.deviceMode,
           serverDns: dns,
           username: user,
@@ -506,9 +506,8 @@ class _LoginGatewayScreenState extends State<LoginGatewayScreen> {
                               onSelect: () {
                                 Navigator.pushReplacement(
                                   context,
-                                  MaterialPageRoute(
-                                      builder: (_) =>
-                                          const DeviceSelectionScreen()),
+                                  createSmoothRoute(
+                                      const DeviceSelectionScreen()),
                                 );
                               },
                               builder: (context, isFocused) => Container(
@@ -735,11 +734,16 @@ class _MainDashboardState extends State<MainDashboard> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   late DeviceMode currentDeviceMode;
+  bool isTVSideMenuOpen = false;
+
   List<StreamItem> allItems = [];
   List<StreamItem> liveItems = [];
   List<StreamItem> movieItems = [];
   List<StreamItem> seriesItems = [];
+  List<SeriesGroup> allSeriesGroups = [];
+
   List<StreamItem> displayedItems = [];
+  List<SeriesGroup> displayedSeries = [];
 
   Map<String, int> categoryCounts = {};
   List<String> sectionCategories = ['Todas'];
@@ -805,8 +809,8 @@ class _MainDashboardState extends State<MainDashboard> {
     if (!mounted) return;
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(
-        builder: (_) => LoginGatewayScreen(
+      createSmoothRoute(
+        LoginGatewayScreen(
           deviceMode: currentDeviceMode,
           allowAutoLogin: false,
           initialDns: widget.serverDns,
@@ -885,25 +889,29 @@ class _MainDashboardState extends State<MainDashboard> {
           }
         }
 
+        final groupedSeries = await compute(groupSeriesItems, series);
+
         if (!mounted) return;
         setState(() {
           allItems = parsed;
           liveItems = live;
           movieItems = movies;
           seriesItems = series;
+          allSeriesGroups = groupedSeries;
           activeSection = live.isNotEmpty
               ? MainSection.live
               : movies.isNotEmpty
                   ? MainSection.movie
                   : MainSection.series;
+          isTVSideMenuOpen = false;
           _rebuildSectionCategories();
           isLoading = false;
         });
 
         if (live.isNotEmpty && activeItem == null) {
-          _startPreview(live.first);
+          _startPreview(live.first, forcePreviewOnly: true);
         } else if (parsed.isNotEmpty && activeItem == null) {
-          _startPreview(parsed.first);
+          _startPreview(parsed.first, forcePreviewOnly: true);
         }
       } else {
         await AppStorage.clearSession();
@@ -984,11 +992,29 @@ class _MainDashboardState extends State<MainDashboard> {
       selectedCategory = 'Todas';
       searchQuery = '';
       _searchController.clear();
+      // Oculta automaticamente o menu lateral ao selecionar uma seção
+      isTVSideMenuOpen = false;
       _rebuildSectionCategories();
     });
   }
 
   void _rebuildSectionCategories() {
+    if (activeSection == MainSection.series) {
+      final Map<String, int> counts = {'Todas': allSeriesGroups.length};
+      for (final s in allSeriesGroups) {
+        counts[s.group] = (counts[s.group] ?? 0) + 1;
+      }
+      final cats = <String>['Todas'];
+      for (final key in counts.keys) {
+        if (key != 'Todas') cats.add(key);
+      }
+      if (!cats.contains(selectedCategory)) selectedCategory = 'Todas';
+      categoryCounts = counts;
+      sectionCategories = cats;
+      _applyCategoryAndSearchFilter();
+      return;
+    }
+
     final baseList = _getBaseListForSection(activeSection);
     final Map<String, int> counts = {'Todas': baseList.length};
 
@@ -1009,6 +1035,23 @@ class _MainDashboardState extends State<MainDashboard> {
   }
 
   void _applyCategoryAndSearchFilter([List<StreamItem>? sourceList]) {
+    if (activeSection == MainSection.series) {
+      List<SeriesGroup> resSeries = selectedCategory == 'Todas'
+          ? allSeriesGroups
+          : allSeriesGroups.where((s) => s.group == selectedCategory).toList();
+
+      if (searchQuery.trim().isNotEmpty) {
+        final q = searchQuery.toLowerCase();
+        resSeries = resSeries
+            .where((s) =>
+                s.title.toLowerCase().contains(q) ||
+                s.group.toLowerCase().contains(q))
+            .toList();
+      }
+      setState(() => displayedSeries = resSeries);
+      return;
+    }
+
     final baseList = sourceList ?? _getBaseListForSection(activeSection);
 
     List<StreamItem> result = selectedCategory == 'Todas'
@@ -1037,6 +1080,7 @@ class _MainDashboardState extends State<MainDashboard> {
         setState(() {
           adultUnlocked = true;
           selectedCategory = category;
+          isTVSideMenuOpen = false;
           _applyCategoryAndSearchFilter();
         });
       });
@@ -1045,8 +1089,27 @@ class _MainDashboardState extends State<MainDashboard> {
 
     setState(() {
       selectedCategory = category;
+      isTVSideMenuOpen = false;
       _applyCategoryAndSearchFilter();
     });
+  }
+
+  void _onSelectSeriesGroup(SeriesGroup series) {
+    if (series.isAdult && !adultUnlocked) {
+      _promptParentalPin(() {
+        adultUnlocked = true;
+        _onSelectSeriesGroup(series);
+      });
+      return;
+    }
+
+    openSeriesDetailsModal(
+      context: context,
+      series: series,
+      onPlayEpisode: (episode, fullSeriesPlaylist) {
+        _openFullScreen(episode, customPlaylist: fullSeriesPlaylist);
+      },
+    );
   }
 
   void _promptParentalPin(VoidCallback onSuccess) {
@@ -1134,18 +1197,21 @@ class _MainDashboardState extends State<MainDashboard> {
     return variants.isEmpty ? [item] : variants;
   }
 
-  Future<void> _startPreview(StreamItem item) async {
+  // 1º CLIQUE = PRÉ-VISUALIZAÇÃO PEQUENA | 2º CLIQUE NO MESMO ITEM = TELA CHEIA
+  Future<void> _startPreview(StreamItem item,
+      {bool forcePreviewOnly = false}) async {
     if (item.isAdult && !adultUnlocked) {
       _promptParentalPin(() {
         adultUnlocked = true;
-        _startPreview(item);
+        _startPreview(item, forcePreviewOnly: forcePreviewOnly);
       });
       return;
     }
 
     _addToRecents(item);
 
-    if (activeItem?.id == item.id && isPreviewReady) {
+    // Se o canal já está selecionado na pré-visualização, o 2º clique abre em Tela Cheia!
+    if (!forcePreviewOnly && activeItem?.id == item.id) {
       _openFullScreen(item);
       return;
     }
@@ -1174,21 +1240,24 @@ class _MainDashboardState extends State<MainDashboard> {
     }
   }
 
-  void _openFullScreen(StreamItem item) {
+  void _openFullScreen(StreamItem item, {List<StreamItem>? customPlaylist}) {
     _addToRecents(item);
     _previewController?.pause();
 
+    final targetPlaylist =
+        customPlaylist ?? (displayedItems.isNotEmpty ? displayedItems : liveItems);
+
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) => SmartAdaptivePlayerScreen(
+      createSmoothRoute(
+        SmartAdaptivePlayerScreen(
           initialItem: item,
-          playlist: displayedItems.isNotEmpty ? displayedItems : liveItems,
+          playlist: targetPlaylist,
           liveChannelsPool: liveItems,
           measuredSpeedMbps: lastMeasuredSpeedMbps,
           onMinimizeToPip: (playingItem) {
             setState(() => isMiniPipFloating = true);
-            _startPreview(playingItem);
+            _startPreview(playingItem, forcePreviewOnly: true);
           },
         ),
       ),
@@ -1209,11 +1278,8 @@ class _MainDashboardState extends State<MainDashboard> {
     );
   }
 
+  // BOTÃO VOLTAR REABRE O MENU LATERAL QUANDO ELE ESTÁ OCULTO
   void _handleDashboardBackButton() {
-    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
-      Navigator.pop(context);
-      return;
-    }
     if (searchQuery.isNotEmpty) {
       setState(() {
         searchQuery = '';
@@ -1222,13 +1288,22 @@ class _MainDashboardState extends State<MainDashboard> {
       });
       return;
     }
-    if (selectedCategory != 'Todas') {
-      setState(() {
-        selectedCategory = 'Todas';
-        _applyCategoryAndSearchFilter();
-      });
-      return;
+
+    if (currentDeviceMode == DeviceMode.tv) {
+      if (!isTVSideMenuOpen) {
+        setState(() => isTVSideMenuOpen = true);
+        return;
+      }
+    } else {
+      final isDrawerOpen = _scaffoldKey.currentState?.isDrawerOpen ?? false;
+      if (!isDrawerOpen) {
+        _scaffoldKey.currentState?.openDrawer();
+        return;
+      } else {
+        Navigator.pop(context);
+      }
     }
+
     showExitAppConfirmationDialog(context);
   }
 
@@ -1268,11 +1343,12 @@ class _MainDashboardState extends State<MainDashboard> {
       totalAllCount: allItems.length,
       liveCount: liveItems.length,
       movieCount: movieItems.length,
-      seriesCount: seriesItems.length,
+      seriesCount: allSeriesGroups.length,
       favoritesCount: favoriteIds.length,
       recentsCount: recentItems.length,
       accountExpDate: accountExpDate,
       displayedItems: displayedItems,
+      displayedSeries: displayedSeries,
       favoriteIds: favoriteIds,
       activeItem: activeItem,
       isMiniPipFloating: isMiniPipFloating,
@@ -1292,6 +1368,7 @@ class _MainDashboardState extends State<MainDashboard> {
       },
       onStartPreview: _startPreview,
       onOpenFullScreen: _openFullScreen,
+      onSelectSeriesGroup: _onSelectSeriesGroup,
       onToggleFavorite: _toggleFavorite,
       onEnableMiniPip: () => setState(() => isMiniPipFloating = true),
       onOpenSpeedTest: _showSpeedTestModal,
@@ -1307,6 +1384,8 @@ class _MainDashboardState extends State<MainDashboard> {
       },
       child: Scaffold(
         key: _scaffoldKey,
+        // Permite abrir o menu lateral no celular arrastando do limite esquerdo da tela
+        drawerEdgeDragWidth: 56,
         drawer: isTVMode ? null : mobileView.buildDrawer(context),
         body: SafeArea(
           child: Stack(
@@ -1317,6 +1396,11 @@ class _MainDashboardState extends State<MainDashboard> {
                       ? _buildErrorState()
                       : isTVMode
                           ? TVDashboardView(
+                              isSideMenuOpen: isTVSideMenuOpen,
+                              onOpenSideMenu: () =>
+                                  setState(() => isTVSideMenuOpen = true),
+                              onCloseSideMenu: () =>
+                                  setState(() => isTVSideMenuOpen = false),
                               activeSection: activeSection,
                               sectionTitle: _getSectionTitle(activeSection),
                               selectedCategory: selectedCategory,
@@ -1325,10 +1409,11 @@ class _MainDashboardState extends State<MainDashboard> {
                               totalAllCount: allItems.length,
                               liveCount: liveItems.length,
                               movieCount: movieItems.length,
-                              seriesCount: seriesItems.length,
+                              seriesCount: allSeriesGroups.length,
                               favoritesCount: favoriteIds.length,
                               recentsCount: recentItems.length,
                               displayedItems: displayedItems,
+                              displayedSeries: displayedSeries,
                               favoriteIds: favoriteIds,
                               activeItem: activeItem,
                               activeQualityVariants:
@@ -1351,6 +1436,7 @@ class _MainDashboardState extends State<MainDashboard> {
                               },
                               onStartPreview: _startPreview,
                               onOpenFullScreen: _openFullScreen,
+                              onSelectSeriesGroup: _onSelectSeriesGroup,
                               onToggleFavorite: _toggleFavorite,
                               onOpenSpeedTest: _showSpeedTestModal,
                               onRefreshPlaylist: _loadAccountInfoAndPlaylist,
@@ -1441,7 +1527,7 @@ class _MainDashboardState extends State<MainDashboard> {
         children: [
           const CircularProgressIndicator(color: Color(0xFF00E5FF)),
           const SizedBox(height: 18),
-          const Text('CARREGANDO CONTEÚDOS DA LISTA...'),
+          const Text('SINCRONIZANDO CATÁLOGO E SÉRIES...'),
           const SizedBox(height: 20),
           TVFocusableItem(
             autofocus: true,
