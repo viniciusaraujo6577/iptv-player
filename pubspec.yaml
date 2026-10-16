@@ -1,0 +1,49 @@
+name: iptv_player
+description: "UNEX Vision - Player IPTV Adaptativo para Celular e TV Box (Offline-First)"
+publish_to: "none"
+
+version: 1.1.0+2
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # --- HTTP e rede (mantido) ---
+  http: ^1.2.2
+
+  # --- Reprodução de vídeo (mantido; fallback de codecs aprimorado no core) ---
+  video_player: ^2.9.2
+
+  # ===========================================================================
+  # NOVAS DEPENDÊNCIAS - habilitam as 9 funcionalidades
+  # ===========================================================================
+
+  # [Feature 1+3] Persistência robusta em disco (substitui caminho hardcoded)
+  path_provider: ^2.1.3
+
+  # [Feature 6] Cache de imagens com limite estrito de RAM (memCacheWidth/Height)
+  cached_network_image: ^3.4.1
+
+  # [Feature 5] OTA Check - lê a versão atual do app para comparar com servidor
+  package_info_plus: ^8.1.0
+
+  # [Feature 2] Detecção automática de dispositivo (fallback ao MethodChannel nativo)
+  device_info_plus: ^10.1.2
+
+  # [Feature 8] Gestos táteis: controle de brilho da tela (exclusivo celular)
+  screen_brightness: ^1.0.1
+
+  # [Feature 8] Gestos táteis: controle de volume de mídia (exclusivo celular)
+  flutter_volume_controller: ^1.3.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
